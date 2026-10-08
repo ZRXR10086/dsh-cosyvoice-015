@@ -1,0 +1,5 @@
+# 忽略本地依赖与杂项；注意：**不要**忽略 lib/ 与 assets/
+# lib/client.js 是浏览器端构建产物，GitHub 安装靠 clone，必须进版本库
+node_modules/
+.DS_Store
+*.log

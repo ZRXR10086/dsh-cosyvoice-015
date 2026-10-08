@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-cosyvoice · 界面预览</title>
+<!--
+  这是一份**界面预览**，不连百炼、不进 dsh，纯前端单文件。
+
+  目的：沙箱里 dsh 0.2.1 起不来（依赖装不齐），真机又要装一次才能看，来回太慢。
+  于是把界面抄一份出来，先在这上面把交互跑顺。
+
+  播放不是假动画 —— 走的是真 Web Audio，音频用振荡器现合成，并且完全照
+  client/shared.js 的 feed() 排期：下一块排在上一块结束的那一刻。所以"实时模式
+  句间无缝"这件事在这里是能听出来的，不是靠嘴说。
+-->
+<style>
+  :root {
+    --bg: #101114;
+    --bg-rail: #16181d;
+    --bg-panel: #191c22;
+    --bg-bubble: rgba(255, 255, 255, 0.045);
+    --line: rgba(255, 255, 255, 0.10);
+    --line-soft: rgba(255, 255, 255, 0.06);
+    --fg: #e8eaed;
+    --fg-dim: #9aa0a6;
+    --fg-faint: #6b7076;
+    --accent: #4d8dff;
+    --danger: #e5484d;
+    --ok: #30a46c;
+    color-scheme: dark;
+  }
+  html[data-theme='light'] {
+    --bg: #f7f8fa;
+    --bg-rail: #eef0f4;
+    --bg-panel: #ffffff;
+    --bg-bubble: rgba(0, 0, 0, 0.035);
+    --line: rgba(0, 0, 0, 0.12);
+    --line-soft: rgba(0, 0, 0, 0.07);
+    --fg: #1c1f23;
+    --fg-dim: #5f6368;
+    --fg-faint: #8b9096;
+    --accent: #2f6fe4;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; }
+
+  .app { display: flex; height: 100%; overflow: hidden; }
+
+  /* ── 左侧会话栏 ─────────────────────────────────────────── */
+  .rail {
+    width: 224px; flex: 0 0 224px;
+    background: var(--bg-rail);
+    border-right: 1px solid var(--line-soft);
+    padding: 14px 10px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .rail .brand {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px 14px; font-weight: 600; letter-spacing: .2px;
+  }
+  .rail .brand i {
+    width: 18px; height: 18px; border-radius: 5px;
+    background: linear-gradient(135deg, var(--accent), #8f6bff);
+  }
+  .rail .sec {
+    padding: 10px 8px 4px; font-size: 11px; letter-spacing: .6px;
+    color: var(--fg-faint); text-transform: uppercase;
+  }
+  .rail .item {
+    padding: 7px 9px; border-radius: 7px; font-size: 13px; color: var(--fg-dim);
+    cursor: default; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .rail .item[data-on='1'] { background: var(--bg-bubble); color: var(--fg); }
+  .rail .spacer { flex: 1; }
+  .rail .foot { font-size: 11px; color: var(--fg-faint); padding: 8px; line-height: 1.5; }
+
+  /* ── 中间对话 ───────────────────────────────────────────── */
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    height: 50px; flex: 0 0 50px; display: flex; align-items: center; gap: 10px;
+    padding: 0 16px; border-bottom: 1px solid var(--line-soft);
+  }
+  .topbar .title { font-weight: 600; }
+  .topbar .tag {
+    font-size: 11px; color: var(--fg-faint); border: 1px solid var(--line);
+    border-radius: 999px; padding: 1px 8px;
+  }
+  .topbar .spacer { flex: 1; }
+  .ghost {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 10px; border-radius: 7px;
+    border: 1px solid var(--line); background: transparent; color: var(--fg-dim);
+    cursor: pointer; font-size: 13px; transition: background-color .12s, color .12s;
+  }
+  .ghost:hover { background: var(--bg-bubble); color: var(--fg); }
+  .ghost[data-on='1'] { border-color: var(--accent); color: var(--accent); }
+
+  .stream { flex: 1; overflow-y: auto; padding: 22px 0 8px; }
+  .row { max-width: 760px; margin: 0 auto 22px; padding: 0 20px; }
+  .who {
+    font-size: 12px; color: var(--fg-faint); margin-bottom: 6px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .who b { color: var(--fg-dim); font-weight: 600; }
+  .bubble {
+    border-radius: 12px; padding: 12px 15px; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .row.me .bubble { background: var(--bg-bubble); border: 1px solid var(--line-soft); }
+  .row.me .bubble { margin-left: auto; width: fit-content; max-width: 88%; }
+  .actions { display: flex; align-items: center; gap: 2px; margin-top: 7px; }
+  .act {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 0; border-radius: 6px;
+    border: 1px solid transparent; background: transparent; color: var(--fg-faint);
+    cursor: pointer; transition: background-color .12s, color .12s;
+  }
+  .act:hover { background: var(--bg-bubble); color: var(--fg); }
+  .act[data-on='1'] { border-color: var(--accent); background: var(--bg-bubble); color: var(--accent); }
+  .act[data-busy='1'] { cursor: progress; opacity: .65; }
+  .act[data-err='1'] { color: var(--danger); }
+  .actions .hint { font-size: 12px; color: var(--fg-faint); margin-left: 6px; }
+
+  .composer {
+    max-width: 760px; margin: 0 auto; width: 100%; padding: 0 20px 16px;
+  }
+  .composer .box {
+    border: 1px solid var(--line); border-radius: 12px; padding: 11px 14px;
+    color: var(--fg-faint); font-size: 13px; background: var(--bg-bubble);
+  }
+
+  /* ── 右侧边栏 ───────────────────────────────────────────── */
+  .sidebar {
+    width: 340px; flex: 0 0 340px; background: var(--bg-panel);
+    border-left: 1px solid var(--line-soft);
+    display: flex; flex-direction: column;
+    transition: margin-right .26s cubic-bezier(.22,.61,.36,1);
+  }
+  .sidebar[data-open='0'] { margin-right: -340px; }
+  .sb-head {
+    height: 50px; flex: 0 0 50px; display: flex; align-items: center; gap: 8px;
+    padding: 0 12px 0 16px; border-bottom: 1px solid var(--line-soft);
+  }
+  .sb-head .t { font-weight: 600; flex: 1; }
+  .sb-body { flex: 1; overflow-y: auto; padding: 14px 16px 20px; }
+  .sb-foot {
+    flex: 0 0 auto; padding: 10px 16px; border-top: 1px solid var(--line-soft);
+    font-size: 11px; color: var(--fg-faint);
+  }
+
+  .card {
+    border: 1px solid var(--line-soft); border-radius: 10px;
+    padding: 12px; margin-bottom: 14px; background: var(--bg-bubble);
+  }
+  .card > h4 {
+    margin: 0 0 3px; font-size: 13px; font-weight: 600;
+  }
+  .card > p { margin: 0 0 10px; font-size: 12px; color: var(--fg-faint); line-height: 1.55; }
+
+  .seg { display: flex; gap: 6px; }
+  .seg button {
+    flex: 1; height: 34px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--fg-dim);
+    font-size: 13px; transition: all .12s;
+  }
+  .seg button:hover { background: var(--bg-bubble); color: var(--fg); }
+  .seg button[aria-pressed='true'] {
+    border-color: var(--accent); color: var(--accent); font-weight: 600;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+
+  .sel {
+    width: 100%; height: 32px; margin-top: 4px; padding: 0 8px;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: transparent; color: var(--fg-dim); font-size: 13px;
+  }
+  .sel:focus { outline: none; border-color: var(--accent); color: var(--fg); }
+
+  .line {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; font-size: 12px; color: var(--fg-faint); margin-top: 9px;
+  }
+  .line b { color: var(--fg); font-weight: 600; }
+  .pill {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--fg-dim);
+  }
+  .pill.warn { border-color: var(--danger); color: var(--danger); }
+
+  .voice {
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    padding: 8px 9px; border-radius: 8px; cursor: pointer; text-align: left;
+    border: 1px solid var(--line-soft); background: transparent; margin-bottom: 6px;
+    transition: all .12s;
+  }
+  .voice:hover { background: var(--bg-bubble); }
+  .voice[aria-pressed='true'] { border-color: var(--accent); }
+  .voice .dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px;
+    background: var(--fg-faint);
+  }
+  .voice[aria-pressed='true'] .dot { background: var(--accent); }
+  .voice .n { flex: 1; min-width: 0; }
+  .voice .n .a { font-size: 13px; }
+  .voice .n .b {
+    font-size: 11px; color: var(--fg-faint);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .voice .k { font-size: 11px; color: var(--fg-faint); }
+
+  .btn {
+    width: 100%; height: 34px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--fg-dim);
+    font-size: 13px; transition: all .12s;
+  }
+  .btn:hover { background: var(--bg-bubble); color: var(--fg); }
+  .btn.primary { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .btn + .btn { margin-top: 6px; }
+
+  .bar { height: 5px; border-radius: 999px; background: var(--bg-bubble); overflow: hidden; margin-top: 9px; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+  .stat { font-size: 12px; display: flex; justify-content: space-between; padding: 3px 0; }
+  .stat span { color: var(--fg-faint); }
+  .stat b { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .note {
+    font-size: 11px; color: var(--fg-dim); background: var(--bg-bubble);
+    border-left: 2px solid var(--accent); border-radius: 0 6px 6px 0;
+    padding: 7px 9px; margin-top: 9px; line-height: 1.55;
+  }
+
+  /* 收起后的拉起把手 */
+  .fab {
+    position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+    display: none; align-items: center; gap: 6px;
+    padding: 12px 9px; border-radius: 9px 0 0 9px; cursor: pointer;
+    border: 1px solid var(--line); border-right: none;
+    background: var(--bg-panel); color: var(--fg-dim);
+    font-size: 12px; writing-mode: vertical-rl; box-shadow: -2px 0 12px rgba(0,0,0,.18);
+  }
+  .fab[data-show='1'] { display: flex; }
+  .fab:hover { color: var(--accent); }
+
+  @media (max-width: 1080px) {
+    .rail { display: none; }
+    .sidebar { width: 300px; flex-basis: 300px; }
+    .sidebar[data-open='0'] { margin-right: -300px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- 左侧 -->
+  <aside class="rail">
+    <div class="brand"><i></i> DeepSeek Harness</div>
+    <div class="sec">今天</div>
+    <div class="item" data-on="1">语音插件联调</div>
+    <div class="item">CosyVoice 音色清单</div>
+    <div class="sec">更早</div>
+    <div class="item">dsh 插件机制梳理</div>
+    <div class="item">百炼 API 配额核对</div>
+    <div class="spacer"></div>
+    <div class="foot">预览页 · 静态还原<br>不连宿主、不连百炼</div>
+  </aside>
+
+  <!-- 中间 -->
+  <main class="chat">
+    <div class="topbar">
+      <span class="title">语音插件联调</span>
+      <span class="tag">dsh-cosyvoice 3.0.0</span>
+      <span class="spacer"></span>
+      <button class="ghost" id="btn-theme">切换主题</button>
+      <button class="ghost" id="btn-toggle" data-on="1">收起侧边栏</button>
+    </div>
+
+    <div class="stream" id="stream"><!-- 消息由脚本渲染 --></div>
+
+    <div class="composer">
+      <div class="box">给 DeepSeek 发送消息…（预览页不可输入）</div>
+    </div>
+  </main>
+
+  <!-- 右侧边栏 -->
+  <aside class="sidebar" id="sidebar" data-open="1">
+    <div class="sb-head">
+      <span class="t">语音设置</span>
+      <button class="act" id="btn-close" title="收起" aria-label="收起侧边栏">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round">
+          <path d="M9 6l6 6-6 6"></path>
+        </svg>
+      </button>
+    </div>
+
+    <div class="sb-body">
+      <div class="card">
+        <h4>合成方式</h4>
+        <p>非实时：整段一次合成好再出声。实时：按句边合成边播，第一句好了就响。</p>
+        <div class="seg">
+          <button id="m-one" aria-pressed="true">非实时（整段）</button>
+          <button id="m-stream" aria-pressed="false">实时（流式）</button>
+        </div>
+        <div class="line">
+          <span>当前生效</span>
+          <span><b id="m-now">非实时（整段）</b> <span class="pill" id="m-saved">已写入配置</span></span>
+        </div>
+        <label class="line" style="cursor:pointer">
+          <span>模拟配置写入失败</span>
+          <input type="checkbox" id="m-fail">
+        </label>
+        <div class="note" id="m-note" hidden>写入失败：模式已在本机生效，但没写进宿主配置，重启后会回到默认。</div>
+      </div>
+
+      <div class="card">
+        <h4>角色扮演</h4>
+        <p>开启后，「」里的算台词、其余算旁白。两者用各自的音色合成，再按原文顺序拼成一条。</p>
+        <div class="seg">
+          <button id="rp-off" aria-pressed="true">关闭</button>
+          <button id="rp-on" aria-pressed="false">开启</button>
+        </div>
+        <div class="line"><span>旁白音色</span></div>
+        <select id="rp-narration" class="sel"></select>
+        <div class="line"><span>角色音色</span></div>
+        <select id="rp-character" class="sel"></select>
+        <div class="note">没绑定就跟随当前音色。台词统一用同一个角色音色（一段话里多个角色暂不区分）。</div>
+      </div>
+
+      <div class="card">
+        <h4>音色档案</h4>
+        <p>点一条即用。选中的音色对接下来的每次朗读生效。</p>
+        <div id="voices"></div>
+      </div>
+
+      <div class="card">
+        <h4>音色克隆</h4>
+        <p>上传 10–20 秒 WAV，插件自动创建音色并轮询到就绪。</p>
+        <button class="btn primary" id="btn-clone">选择本地音频</button>
+        <button class="btn" id="btn-clone-demo">用示例音频演示</button>
+        <input type="file" id="file" accept="audio/*" hidden>
+        <div class="bar" id="clone-bar" hidden><i></i></div>
+        <div class="line" id="clone-state" hidden><span id="clone-text"></span></div>
+      </div>
+
+      <div class="card">
+        <h4>试听</h4>
+        <p>用当前音色念一句固定文本。</p>
+        <button class="btn" id="btn-preview">试听当前音色</button>
+      </div>
+
+      <div class="card">
+        <h4>上一次朗读</h4>
+        <div class="stat"><span>模式</span><b id="s-mode">—</b></div>
+        <div class="stat"><span>音色</span><b id="s-voice">—</b></div>
+        <div class="stat"><span>首包延迟</span><b id="s-first">—</b></div>
+        <div class="stat"><span>音频时长</span><b id="s-dur">—</b></div>
+        <div class="stat"><span>段落</span><b id="s-chunks">—</b></div>
+        <div class="stat"><span>字数</span><b id="s-chars">—</b></div>
+      </div>
+    </div>
+
+    <div class="sb-foot">界面预览 · 音频由浏览器本地合成，用于验证排期与交互</div>
+  </aside>
+</div>
+
+<button class="fab" id="fab">语音设置</button>
+
+<script>
+'use strict';
+
+/* ══════════════════════════════════════════════════════════════════
+   1. 音频：真 Web Audio，照 client/shared.js 的 feed() 排期
+   ══════════════════════════════════════════════════════════════ */
+
+var RATE = 24000;          // 与 host/stream.js 的 STREAM_SAMPLE_RATE 一致
+var ctx = null;            // 懒建：浏览器要求先有用户手势
+var sources = [];
+var nextStart = 0;
+var open = false;          // 流是否还在继续（对应 shared.js 的 streaming.open）
+var cursor = 0;            // 全局采样游标，保证分块之间波形相位连续
+
+function audio() {
+  if (ctx === null) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') ctx.resume();
+  return ctx;
+}
+
+/**
+ * 现合成一段"像说话"的波形。
+ *
+ * 关键是 cursor 连续递增：分块之间不会出现爆音，于是"实时模式无缝"这件事
+ * 在这里是能听出来的，而不是靠时长相等来假装无缝。
+ */
+function synth(count, base) {
+  var out = new Float32Array(count);
+  for (var i = 0; i < count; i++) {
+    var t = (cursor + i) / RATE;
+    var f = base * (1 + 0.055 * Math.sin(2 * Math.PI * 0.7 * t));          // 语调起伏
+    var s = 0.55 * Math.sin(2 * Math.PI * f * t)
+          + 0.17 * Math.sin(2 * Math.PI * f * 2 * t)
+          + 0.08 * Math.sin(2 * Math.PI * f * 3 * t);
+    s *= 0.34 + 0.66 * Math.abs(Math.sin(2 * Math.PI * 3.1 * t));          // 音节包络
+    out[i] = s * 0.2;
+  }
+  cursor += count;
+  return out;
+}
+
+/** 重置一条流的排期状态。 */
+function resetStream() {
+  for (var i = 0; i < sources.length; i++) {
+    try { sources[i].onended = null; sources[i].stop(); } catch (e) {}
+  }
+  sources = [];
+  nextStart = 0;
+  open = false;
+  cursor = 0;
+  if (typeof window !== 'undefined') window.__sched = [];  // 给冒烟脚本看排期
+}
+
+/**
+ * 排一块音频。与 shared.js 的 feed() 同一套算法：
+ * 下一块排在上一块结束的那一刻（采样级），不是"播完再去取下一块"。
+ * @returns 这一块真正出声的时刻（AudioContext 时间轴）。
+ */
+function feed(samples, onEnded) {
+  var c = audio();
+  var buffer = c.createBuffer(1, samples.length, RATE);
+  buffer.getChannelData(0).set(samples);
+
+  var source = c.createBufferSource();
+  source.buffer = buffer;
+  source.connect(c.destination);
+
+  var startedAt = Math.max(nextStart, c.currentTime);
+  source.start(startedAt);
+  nextStart = startedAt + buffer.duration;
+
+  if (typeof window !== 'undefined') {
+    (window.__sched || (window.__sched = [])).push({ start: startedAt, dur: buffer.duration });
+  }
+
+  source.onended = function () {
+    var at = sources.indexOf(source);
+    if (at >= 0) sources.splice(at, 1);
+    // 最后一块播完、且没有新块要来 → 收尾
+    if (sources.length === 0 && !open && typeof onEnded === 'function') onEnded();
+  };
+  sources.push(source);
+  return startedAt;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2. 状态：模式、音色
+   ══════════════════════════════════════════════════════════════ */
+
+var MODE_KEY = 'dsh-cosyvoice.mode';       // 与 shared.js 的 MODE_KEY 同名
+var memory = null;                          // localStorage 不可用时的兜底
+
+function readMode() {
+  if (memory !== null) return memory;
+  try { return window.localStorage.getItem(MODE_KEY) || 'one-shot'; }
+  catch (e) { return 'one-shot'; }
+}
+function saveMode(value) {
+  memory = value;
+  try { window.localStorage.setItem(MODE_KEY, value); } catch (e) {}
+}
+
+var mode = readMode();
+
+var voices = [
+  { id: 'longxiaochun', name: '龙小淳（女·温柔）', model: 'cosyvoice-v3.5-plus', base: 232, kind: '预置' },
+  { id: 'longxiaoxia',  name: '龙小夏（女·活泼）', model: 'cosyvoice-v3.5-plus', base: 268, kind: '预置' },
+  { id: 'longlaotie',   name: '龙老铁（男·沉稳）', model: 'cosyvoice-v3.5-plus', base: 124, kind: '预置' },
+];
+var voiceId = voices[0].id;
+
+function voice() {
+  for (var i = 0; i < voices.length; i++) if (voices[i].id === voiceId) return voices[i];
+  return voices[0];
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2b. 角色扮演：开关 + 两个音色绑定 + 文本切分
+   ══════════════════════════════════════════════════════════════ */
+
+var RP_KEY = 'dsh-cosyvoice.roleplay';
+var NAR_KEY = 'dsh-cosyvoice.narrationVoice';
+var CHAR_KEY = 'dsh-cosyvoice.characterVoice';
+
+/** localStorage 不可用时的兜底。 */
+var prefMemory = {};
+
+/**
+ * 读一个本机偏好。
+ * @returns 存过的值；**没存过是 null**，存过"跟随当前音色"是空串 —— 两者有别。
+ */
+function readPref(key) {
+  if (Object.prototype.hasOwnProperty.call(prefMemory, key)) return prefMemory[key];
+  try {
+    if (window.localStorage !== undefined && window.localStorage !== null) {
+      var stored = window.localStorage.getItem(key);
+      return stored === null || stored === undefined ? null : String(stored);
+    }
+  } catch (e) {}
+  return null;
+}
+
+function savePref(key, value) {
+  prefMemory[key] = value;
+  try {
+    if (window.localStorage !== undefined && window.localStorage !== null) {
+      window.localStorage.setItem(key, value);
+    }
+  } catch (e) {}
+}
+
+var roleplay = readPref(RP_KEY) === 'true';
+var narrationId = readPref(NAR_KEY) === null ? '' : readPref(NAR_KEY);
+var characterId = readPref(CHAR_KEY) === null ? '' : readPref(CHAR_KEY);
+
+/** @param id - 音色 ID。 @returns 档案；没这条时 undefined。 */
+function byId(id) {
+  for (var i = 0; i < voices.length; i++) if (voices[i].id === id) return voices[i];
+  return undefined;
+}
+
+/** @returns 旁白用的音色：没绑定就跟随当前音色。 */
+function narrationVoice() {
+  return byId(narrationId) || voice();
+}
+
+/** @returns 台词用的音色：没绑定就跟随当前音色。 */
+function characterVoice() {
+  return byId(characterId) || voice();
+}
+
+var NARRATION = 'narration';
+var DIALOGUE = 'dialogue';
+
+/**
+ * 把文本切成旁白段与台词段。
+ *
+ * 顺序是这个函数的**唯一硬要求**：切完之后按原顺序拼回去必须还是原文。旁白和
+ * 台词会用不同音色分别合成，一旦错乱，念出来就是"先说台词再补旁白"。
+ *
+ * 两个边界照插件里的定法定：没闭合的「不当台词（输出被截断时常见，否则会把后面
+ * 所有旁白用角色的声音念出来）；空的「」丢掉（否则 TTS 会念出"引号"两个字）。
+ * @param text - 文本。
+ * @returns 段序列。
+ */
+function splitDialogue(text) {
+  var parts = [];
+  var buffer = '';
+  var i = 0;
+
+  function flush() {
+    var trimmed = buffer.trim();
+    buffer = '';
+    if (trimmed !== '') parts.push({ kind: NARRATION, text: trimmed });
+  }
+
+  while (i < text.length) {
+    var ch = text[i];
+    if (ch === '「') {
+      var end = text.indexOf('」', i + 1);
+      if (end === i + 1) { i = end + 1; continue; }
+      if (end > i + 1) {
+        flush();
+        var line = text.slice(i + 1, end).trim();
+        if (line !== '') parts.push({ kind: DIALOGUE, text: line });
+        i = end + 1;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    buffer += ch;
+    i += 1;
+  }
+  flush();
+  return parts;
+}
+
+/**
+ * 合并相邻的同类型段：连续几段旁白本就该一口气念完，切开反而插入一次合成往返。
+ * @param parts - 段序列。
+ * @returns 合并结果。
+ */
+function mergeParts(parts) {
+  var merged = [];
+  for (var i = 0; i < parts.length; i++) {
+    var last = merged[merged.length - 1];
+    if (last !== undefined && last.kind === parts[i].kind) {
+      last.text = last.text + parts[i].text;
+      continue;
+    }
+    merged.push({ kind: parts[i].kind, text: parts[i].text });
+  }
+  return merged;
+}
+
+/**
+ * 排定这次朗读要念哪几段、每段用哪个声音。
+ *
+ * 与插件里的取值顺序一致：绑定 > 当前音色。没绑定任何音色时，旁白和台词都是
+ * 当前声音 —— 于是"开了角色扮演却没去绑音色"也不会变成没声音。
+ * @param text - 文本。
+ * @returns 段序列，每段带 `voice`。
+ */
+function planParts(text) {
+  if (!roleplay) return [{ kind: NARRATION, text: text, voice: voice() }];
+
+  var parts = mergeParts(splitDialogue(text));
+  var narration = narrationVoice();
+  var character = characterVoice();
+  var hasLine = false;
+  for (var i = 0; i < parts.length; i++) if (parts[i].kind === DIALOGUE) hasLine = true;
+
+  // 一句台词都没有：整段都是旁白，那就用旁白音色一次念完，不必分段。
+  if (!hasLine) return [{ kind: NARRATION, text: text, voice: narration }];
+
+  for (var j = 0; j < parts.length; j++) {
+    parts[j].voice = parts[j].kind === DIALOGUE ? character : narration;
+  }
+  return parts;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   3. 模拟后端：fakeTts
+   ── 非实时：整段合成完才给第一帧，延迟随字数涨
+   ── 实时：  按句给块，第一句好了就给，句间只隔网络往返
+   ══════════════════════════════════════════════════════════════ */
+
+var CHUNK_SEC = 0.42;
+
+/** 按句切块，块的时长与句长相关，让"按句播放"听起来有节奏。 */
+function chunksOf(text) {
+  var parts = text.split(/(?<=[。！？；\n])/).filter(function (s) { return s.trim() !== ''; });
+  if (parts.length === 0) parts = [text];
+  var total = 0;
+  for (var i = 0; i < parts.length; i++) total += parts[i].length;
+  return parts.map(function (s) {
+    return Math.max(0.18, Math.min(1.4, CHUNK_SEC * (s.length / Math.max(1, total / parts.length))));
+  });
+}
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+/**
+ * 一次朗读。
+ * @param text - 文本
+ * @param onFirst - 第一声真正响起的时刻（ms 相对调用）
+ * @param onEnd - 全部播完
+ * @returns 统计
+ */
+async function speak(text, onFirst, onEnd) {
+  var t0 = performance.now();
+  var parts = planParts(text);
+  var multi = parts.length > 1 || parts[0].kind === DIALOGUE;
+
+  var narration = 0;
+  var dialogue = 0;
+  for (var n = 0; n < parts.length; n++) {
+    if (parts[n].kind === DIALOGUE) dialogue += 1;
+    else narration += 1;
+  }
+
+  var stat = {
+    mode: mode,
+    voice: multi
+      ? '旁白：' + narrationVoice().name + ' / 台词：' + characterVoice().name
+      : parts[0].voice.name,
+    first: 0,
+    duration: 0,
+    chunks: 0,
+    chars: text.length,
+    narration: multi ? narration : 0,
+    dialogue: multi ? dialogue : 0,
+  };
+
+  resetStream();
+  open = true;
+
+  var firstAt = null;
+  var total = 0;
+  var blocks = 0;
+
+  if (mode === 'stream') {
+    // 实时：所有段一起发起了，所以按序出声时，段与段之间只有排期、没有等待。
+    for (var pi = 0; pi < parts.length; pi++) {
+      var secs = chunksOf(parts[pi].text);
+      for (var ci = 0; ci < secs.length; ci++) {
+        await sleep(pi === 0 && ci === 0 ? 260 : 170);
+        var samples = synth(Math.round(secs[ci] * RATE), parts[pi].voice.base);
+        var at = feed(samples, onEnd);
+        total += secs[ci];
+        blocks += 1;
+        if (firstAt === null) firstAt = performance.now() + (at - audio().currentTime) * 1000;
+      }
+    }
+  } else if (multi) {
+    // 非实时 + 角色扮演：先把每一段都"合成完"，再按原文顺序拼成一条播出去。
+    // 连续 feed 就是拼接：排期上一段的末尾正是下一段的开头，等价于把 PCM 直接
+    // 接起来 —— 顺序写死在时间轴上，不会错。
+    await sleep(Math.min(2200, 460 + text.length * 11));
+    for (var mi = 0; mi < parts.length; mi++) {
+      var msecs = chunksOf(parts[mi].text);
+      for (var mj = 0; mj < msecs.length; mj++) {
+        var msamples = synth(Math.round(msecs[mj] * RATE), parts[mi].voice.base);
+        var mat = feed(msamples, onEnd);
+        total += msecs[mj];
+        blocks += 1;
+        if (firstAt === null) firstAt = performance.now() + (mat - audio().currentTime) * 1000;
+      }
+    }
+  } else {
+    // 非实时、单音色：整段一次合成，合成完才出第一声。
+    var whole = Math.round(chunksOf(text).reduce(function (a, b) { return a + b; }, 0) * RATE);
+    await sleep(Math.min(1900, 420 + text.length * 11));
+    var all = synth(whole, parts[0].voice.base);
+    var at2 = feed(all, onEnd);
+    firstAt = performance.now() + (at2 - audio().currentTime) * 1000;
+    total = chunksOf(text).reduce(function (a, b) { return a + b; }, 0);
+    blocks = 1;
+  }
+
+  open = false;
+  stat.first = Math.round(firstAt - t0);
+  stat.duration = total;
+  stat.chunks = blocks;
+  if (typeof onFirst === 'function') onFirst(stat);
+  // 非实时/实时都已在 onended 里收尾；这里再兜一次（静音或极短音频时 onended 可能不触发）
+  return stat;
+}
+
+function stopAll() { resetStream(); }
+
+/* ══════════════════════════════════════════════════════════════════
+   4. 界面
+   ══════════════════════════════════════════════════════════════ */
+
+// 键名必须是 SVG 的真实属性名（kebab），驼峰的 strokeWidth 之类 setAttribute 不认。
+var ICON = {
+  width: '16', height: '16', viewBox: '0 0 24 24', fill: 'none',
+  stroke: 'currentColor', 'stroke-width': '1.8',
+  'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+};
+var SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svg(paths, extra) {
+  var el = document.createElementNS(SVG_NS, 'svg');
+  for (var k in ICON) el.setAttribute(k, ICON[k]);
+  paths.forEach(function (d) {
+    var p = document.createElementNS(SVG_NS, 'path');
+    p.setAttribute('d', d);
+    if (extra) for (var a in extra) p.setAttribute(a, extra[a]);
+    el.appendChild(p);
+  });
+  return el;
+}
+
+/** 喇叭：待播（与 client/message-button.js 同一组 path）。 */
+function iconSpeak() {
+  return svg([
+    'M11 5 6 9H3v6h3l5 4V5z',
+    'M15.5 8.5a5 5 0 0 1 0 7',
+    'M18.5 5.5a9 9 0 0 1 0 13',
+  ]);
+}
+/** 方块：播放中。 */
+function iconStop() {
+  var el = document.createElementNS(SVG_NS, 'svg');
+  for (var k in ICON) el.setAttribute(k, ICON[k]);
+  var r = document.createElementNS(SVG_NS, 'rect');
+  r.setAttribute('x', '7'); r.setAttribute('y', '7');
+  r.setAttribute('width', '10'); r.setAttribute('height', '10');
+  r.setAttribute('rx', '2'); r.setAttribute('fill', 'currentColor');
+  r.setAttribute('stroke', 'none');
+  el.appendChild(r);
+  return el;
+}
+/**
+ * 转圈：合成中。
+ * animateTransform 必须包在 <g> 里 —— SVG 动画作用于父元素，直接挂 <svg> 下
+ * 会连图标在按钮里的位置一起转（v2 修的那个"整体也在转"）。
+ */
+function iconBusy() {
+  var el = document.createElementNS(SVG_NS, 'svg');
+  for (var k in ICON) el.setAttribute(k, ICON[k]);
+  var g = document.createElementNS(SVG_NS, 'g');
+  var p = document.createElementNS(SVG_NS, 'path');
+  p.setAttribute('d', 'M12 3a9 9 0 1 0 9 9');
+  p.setAttribute('opacity', '0.85');
+  g.appendChild(p);
+  var an = document.createElementNS(SVG_NS, 'animateTransform');
+  an.setAttribute('attributeName', 'transform');
+  an.setAttribute('type', 'rotate');
+  an.setAttribute('from', '0 12 12');
+  an.setAttribute('to', '360 12 12');
+  an.setAttribute('dur', '0.9s');
+  an.setAttribute('repeatCount', 'indefinite');
+  g.appendChild(an);
+  el.appendChild(g);
+  return el;
+}
+
+var MESSAGES = [
+  { who: 'me', text: '帮我把语音插件的两种合成方式讲清楚，各自适合什么场景。' },
+  { who: 'ai', text: '非实时把整段话一次合成完再播，音质和韵律最完整，适合长段落。' },
+  { who: 'ai', text: '实时模式按句边合成边播，第一句好了就出声，等待时间从「整段」降到「一句话」。代价是句与句之间的韵律衔接不如整段自然，所以短回复收益最大。' },
+  { who: 'ai', text: '排期上是采样级无缝的：下一块音频排在上一段结束的那一刻，而不是播完再去取下一块，所以听不出句与句之间的空隙。' },
+  { who: 'ai', text: '如果你主要让它念长回答，非实时更稳；如果追求「点下去马上出声」，用实时。两种模式在右侧边栏随时切换，切换当场生效，不用重启插件，也不用重新装插件。' },
+  // 一条角色扮演风格的回答：旁白与台词交替，用来听两种音色的切换。
+  { who: 'ai', text: '他推开门，屋里的灯还亮着。「你终于来了，」她说，声音很轻，「我以为你不会来了。」他在门口站了几秒，才把门带上。' },
+];
+
+var playingId = null;
+var busyId = null;
+
+function render() {
+  var stream = document.getElementById('stream');
+  stream.textContent = '';
+  MESSAGES.forEach(function (m, i) {
+    var row = document.createElement('div');
+    row.className = 'row ' + (m.who === 'me' ? 'me' : 'ai');
+
+    if (m.who === 'ai') {
+      var who = document.createElement('div');
+      who.className = 'who';
+      who.innerHTML = '<b>DeepSeek</b><span>·</span><span>回答 ' + (i) + '</span>';
+      row.appendChild(who);
+    }
+
+    var bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = m.text;
+    row.appendChild(bubble);
+
+    if (m.who === 'ai') {
+      row.appendChild(actionRow(i, m.text));
+    }
+    stream.appendChild(row);
+  });
+}
+
+/** 回答末尾那一排动作：播放键 + 点赞/点踩/复制（后三个是摆设，只为还原观感）。 */
+function actionRow(id, text) {
+  var wrap = document.createElement('div');
+  wrap.className = 'actions';
+
+  var playing = playingId === id;
+  var busy = busyId === id;
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'act';
+  btn.dataset.role = 'speak';   // 与宿主那排装饰按钮区分开
+  btn.title = playing ? '停止' : busy ? '合成中…' : '朗读这条回答';
+  btn.setAttribute('aria-label', btn.title);
+  if (playing) btn.dataset.on = '1';
+  if (busy) btn.dataset.busy = '1';
+  btn.appendChild(playing ? iconStop() : busy ? iconBusy() : iconSpeak());
+
+  btn.onclick = function () {
+    if (playingId === id) { stopAll(); playingId = null; render(); return; }
+    if (busyId !== null) return;
+    busyId = id;
+    render();
+    speak(text, function (st) {
+      busyId = null;
+      playingId = id;
+      renderStat(st);
+      render();
+    }, function () {
+      if (playingId === id) { playingId = null; render(); }
+    });
+  };
+  wrap.appendChild(btn);
+
+  // 与宿主那排按钮的视觉重量保持一致（不可点）
+  [['M7 10v7M12 10v7M17 10v7', '不喜欢'], ['M4 12a8 8 0 1 1 3 6.2V15H4z', '重新生成'],
+   ['M9 9h9v9H9zM6 15H3V6h9v3', '复制']].forEach(function (pair) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'act'; b.title = pair[1];
+    b.appendChild(svg([pair[0]]));
+    wrap.appendChild(b);
+  });
+
+  var hint = document.createElement('span');
+  hint.className = 'hint';
+  hint.textContent = (mode === 'stream' ? '实时：按句出声' : '非实时：整段一次')
+    + (roleplay ? ' · 分角色' : '');
+  wrap.appendChild(hint);
+
+  return wrap;
+}
+
+function renderStat(st) {
+  document.getElementById('s-mode').textContent = st.mode === 'stream' ? '实时（流式）' : '非实时（整段）';
+  document.getElementById('s-voice').textContent = st.voice;
+  document.getElementById('s-first').textContent = st.first + ' ms';
+  document.getElementById('s-dur').textContent = st.duration.toFixed(2) + ' s';
+  // 角色扮演时"段落"比"分块数"有信息量：旁白几句、台词几句。
+  document.getElementById('s-chunks').textContent = st.narration + st.dialogue > 0
+    ? '旁白 ' + st.narration + ' · 台词 ' + st.dialogue
+    : String(st.chunks);
+  document.getElementById('s-chars').textContent = st.chars;
+}
+
+/* ── 角色扮演开关与两个音色绑定 ─────────────────────────────── */
+var rpOn = document.getElementById('rp-on');
+var rpOff = document.getElementById('rp-off');
+var selNarration = document.getElementById('rp-narration');
+var selCharacter = document.getElementById('rp-character');
+
+function paintRoleplay() {
+  rpOn.setAttribute('aria-pressed', roleplay ? 'true' : 'false');
+  rpOff.setAttribute('aria-pressed', roleplay ? 'false' : 'true');
+}
+
+/**
+ * 填一个音色下拉：跟随当前音色 + 每一条档案。
+ * @param sel - 下拉元素。
+ * @param current - 当前值。
+ */
+function fillVoiceSelect(sel, current) {
+  sel.textContent = '';
+  var follow = document.createElement('option');
+  follow.value = '';
+  follow.textContent = '跟随当前音色';
+  sel.appendChild(follow);
+  for (var i = 0; i < voices.length; i++) {
+    var opt = document.createElement('option');
+    opt.value = voices[i].id;
+    opt.textContent = voices[i].name;
+    sel.appendChild(opt);
+  }
+  sel.value = current;
+}
+
+function fillVoiceSelects() {
+  fillVoiceSelect(selNarration, narrationId);
+  fillVoiceSelect(selCharacter, characterId);
+}
+
+/** 拨开关：本地记住，并让所有播放键的说明跟着变。 */
+function switchRoleplay(on) {
+  roleplay = on;
+  savePref(RP_KEY, on ? 'true' : 'false');
+  paintRoleplay();
+  render();
+}
+rpOn.onclick = function () { switchRoleplay(true); };
+rpOff.onclick = function () { switchRoleplay(false); };
+selNarration.onchange = function () {
+  narrationId = selNarration.value;
+  savePref(NAR_KEY, narrationId);
+};
+selCharacter.onchange = function () {
+  characterId = selCharacter.value;
+  savePref(CHAR_KEY, characterId);
+};
+
+/* ── 侧边栏开合 ─────────────────────────────────────────────── */
+var sidebar = document.getElementById('sidebar');
+var fab = document.getElementById('fab');
+var btnToggle = document.getElementById('btn-toggle');
+
+function setOpen(on) {
+  sidebar.dataset.open = on ? '1' : '0';
+  fab.dataset.show = on ? '0' : '1';
+  btnToggle.textContent = on ? '收起侧边栏' : '拉起侧边栏';
+}
+btnToggle.onclick = function () { setOpen(sidebar.dataset.open !== '1'); };
+document.getElementById('btn-close').onclick = function () { setOpen(false); };
+fab.onclick = function () { setOpen(true); };
+
+/* ── 主题 ───────────────────────────────────────────────────── */
+document.getElementById('btn-theme').onclick = function () {
+  var now = document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', now === 'light' ? 'dark' : 'light');
+};
+
+/* ── 模式切换（照 v2.1.1 的行为：本地记住 + 失败可见） ────────── */
+var mOne = document.getElementById('m-one');
+var mStream = document.getElementById('m-stream');
+var mNow = document.getElementById('m-now');
+var mSaved = document.getElementById('m-saved');
+var mNote = document.getElementById('m-note');
+var mFail = document.getElementById('m-fail');
+
+function paintMode(written) {
+  mOne.setAttribute('aria-pressed', mode === 'one-shot' ? 'true' : 'false');
+  mStream.setAttribute('aria-pressed', mode === 'stream' ? 'true' : 'false');
+  mNow.textContent = mode === 'stream' ? '实时（流式）' : '非实时（整段）';
+  if (written) {
+    mSaved.textContent = '已写入配置';
+    mSaved.className = 'pill';
+    mNote.hidden = true;
+  } else {
+    mSaved.textContent = '未写入配置';
+    mSaved.className = 'pill warn';
+    mNote.hidden = false;
+  }
+}
+
+function switchMode(target) {
+  mode = target;
+  saveMode(target);
+  // 真插件在这里还会试着写回宿主配置；这个勾选框用来模拟"写不进去"的情况。
+  var written = !mFail.checked;
+  paintMode(written);
+  render();
+}
+mOne.onclick = function () { switchMode('one-shot'); };
+mStream.onclick = function () { switchMode('stream'); };
+mFail.onchange = function () { paintMode(!mFail.checked); };
+
+/* ── 音色档案 ───────────────────────────────────────────────── */
+var voicesBox = document.getElementById('voices');
+
+function paintVoices() {
+  voicesBox.textContent = '';
+  voices.forEach(function (v) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'voice';
+    b.setAttribute('aria-pressed', v.id === voiceId ? 'true' : 'false');
+
+    var dot = document.createElement('i');
+    dot.className = 'dot';
+    b.appendChild(dot);
+
+    var n = document.createElement('span');
+    n.className = 'n';
+    var a = document.createElement('div');
+    a.className = 'a';
+    a.textContent = v.name;
+    var c = document.createElement('div');
+    c.className = 'b';
+    c.textContent = v.id + ' · ' + v.model;
+    n.appendChild(a); n.appendChild(c);
+    b.appendChild(n);
+
+    var k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = v.kind;
+    b.appendChild(k);
+
+    b.onclick = function () { voiceId = v.id; paintVoices(); };
+    voicesBox.appendChild(b);
+  });
+}
+
+/* ── 克隆（模拟：上传 → 创建 → 轮询就绪 → 入列） ─────────────── */
+var cloneBar = document.getElementById('clone-bar');
+var cloneState = document.getElementById('clone-state');
+var cloneText = document.getElementById('clone-text');
+var fileInput = document.getElementById('file');
+
+async function runClone(label) {
+  cloneBar.hidden = false;
+  cloneState.hidden = false;
+  var fill = cloneBar.firstElementChild;
+  fill.style.width = '0%';
+
+  cloneText.textContent = '上传中…';
+  await sleep(420);
+  fill.style.width = '25%';
+
+  cloneText.textContent = '已上传，创建音色…';
+  await sleep(520);
+  fill.style.width = '55%';
+
+  cloneText.textContent = '部署中（DEPLOYING）…';
+  await sleep(700);
+  fill.style.width = '80%';
+
+  cloneText.textContent = '轮询就绪…';
+  await sleep(560);
+  fill.style.width = '100%';
+
+  var id = 'my-voice-' + (voices.length + 1);
+  voices.push({
+    id: id,
+    name: label + '（我的音色）',
+    model: 'cosyvoice-v3.5-plus',
+    base: 196,
+    kind: '克隆',
+  });
+  voiceId = id;
+  paintVoices();
+  // 新音色要出现在两个绑定下拉里，否则刚克隆好却绑不上。
+  fillVoiceSelects();
+  cloneText.textContent = '就绪：' + id;
+}
+
+document.getElementById('btn-clone').onclick = function () { fileInput.click(); };
+fileInput.onchange = function () {
+  var f = fileInput.files && fileInput.files[0];
+  runClone(f ? f.name.replace(/\.[^.]+$/, '').slice(0, 12) : '我的音色');
+  fileInput.value = '';
+};
+document.getElementById('btn-clone-demo').onclick = function () { runClone('示例音频'); };
+
+/* ── 试听 ───────────────────────────────────────────────────── */
+document.getElementById('btn-preview').onclick = function () {
+  // 角色扮演开着的时候，试听文本得带一句台词，否则听不出两种声音。
+  var sample = roleplay
+    ? '旁白先用旁白音色念这一句。「这一句是角色说的，用的是角色音色。」最后旁白收一句。'
+    : '这是一段用于确认音色与语速的试听文本。';
+  speak(sample, function (st) { renderStat(st); }, function () {});
+};
+
+/* ── 起手 ───────────────────────────────────────────────────── */
+paintMode(true);
+paintRoleplay();
+fillVoiceSelects();
+paintVoices();
+render();
+</script>
+</body>
+</html>

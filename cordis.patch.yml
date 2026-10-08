@@ -1,0 +1,19 @@
+# dsh-cosyvoice 自己的 composition 层。
+#
+# 声明为本包的 `dsh.bundle.patch`，因此
+# `dsh plugin --profile <name> add <本包路径>` 即是一次完整安装：
+# CLI 发现这个依赖声明了 `dsh.bundle`，就把本包追加进 profile 的
+# `dsh.profile.bundles`，并应用下面这一层，无需手工改任何配置。
+#
+# 层顺序为：先 `dsh.profile.bundles` 里的每个 bundle，再 profile 自己的
+# `cordis.patch.yml`，最后 `--patch` 覆盖层。所以下面这一行仍可由用户
+# 在自己的 patch 层里按 id 禁用或覆盖：
+#
+#   - id: cosyvoice
+#     disabled: true
+#
+# `name` 是本包自己的名字；Loader 的 baseUrl 是 profile 目录，
+# 其 node_modules 里放着安装好的副本。
+- insert:
+    - id: cosyvoice
+      name: dsh-cosyvoice
