@@ -6,11 +6,15 @@
  * 工作"——包括 cordis 的 `apply(ctx, config)` 签名、`harness.js` 的包解析、路由
  * 分发、以及一次合成从 HTTP 请求到音频字节的全过程。
  *
- * 三处刻意的设计：
+ * 四处理刻意的设计：
  *
- * - **非实时与实时各起一台服务器**：同一份路由代码在两种 `mode` 下各注册一次，
- *   于是"同一个 HTTP 表面两种形态"这件事是真的被测到的 —— 而不是两边各造一批
+ * - **非实时、实时、角色扮演各起一台服务器**：同一份路由代码在三种配置下各注册一次，
+ *   于是"同一个 HTTP 表面几种形态"这件事是真的被测到的 —— 而不是各处各造一批
  *   各自的 mocks，proving 不了它们共享的那段代码。
+ * - **音色档案是三台共享的一份 JSON**（`~/.dsh/voice/profiles.json`，插件自管）。
+ *   所以角色扮演那一台必须**最后**才挂：它要绑两套档案，提前建档案会污染前面那些
+ *   "档案清单为空"的用例。绑定值是**档案 id** 而不是音色 ID —— 档案才是
+ *   "模型 + 音色"的完整单位（MiMo 复刻音色压根没有 ID 可绑）。
  * - **临时 harness home**：`DSH_HOME` 指向一个临时目录，里面按真实布局放一个
  *   `profiles/node_modules/@deepseek-ai/schemastery` 链接，于是这份测试同时验证了
  *   锚点解析这条路径本身。
@@ -216,19 +220,9 @@ before(async () => {
     mode: 'stream',
   })
 
-  /** 角色扮演那一台：旁白与台词各绑一个音色，便于断言"谁念了哪一段"。 */
-  const roleplay = spareContext()
-  plugin.apply(roleplay.ctx, {
-    apiKey: 'sk-test',
-    voiceId: 'voice-1',
-    model: 'cosyvoice-v3.5-plus',
-    outputDir: join(home, 'audio-roleplay'),
-    bootSound: true,
-    mode: 'one-shot',
-    roleplay: true,
-    narrationVoiceId: 'voice-narration',
-    characterVoiceId: 'voice-character',
-  })
+  // 角色扮演那一台在「角色扮演路由」那个 describe 里才挂：它要绑两套**音色档案**，
+  // 而档案清单是三台共享的一份 JSON（`~/.dsh/voice/profiles.json`）。提前建档案会
+  // 污染前面那些"档案清单为空"的用例，所以挪到后面连着档案一起建。
 
   server = serveWith(plain.routes)
   await new Promise((resolveListen) => { server.listen(0, '127.0.0.1', resolveListen) })
@@ -237,16 +231,13 @@ before(async () => {
   streamServer = serveWith(realtime.routes)
   await new Promise((resolveListen) => { streamServer.listen(0, '127.0.0.1', resolveListen) })
   streamBase = `http://127.0.0.1:${String(streamServer.address().port)}`
-
-  roleplayServer = serveWith(roleplay.routes)
-  await new Promise((resolveListen) => { roleplayServer.listen(0, '127.0.0.1', resolveListen) })
-  roleplayBase = `http://127.0.0.1:${String(roleplayServer.address().port)}`
 })
 
+// 角色扮演那一台由它自己的 describe 关闭：那个 describe 的`before` 才建它
+// （要连带建两套音色档案），所以它的生命周期不对齐前两台。
 after(() => {
   if (server !== undefined) server.close()
   if (streamServer !== undefined) streamServer.close()
-  if (roleplayServer !== undefined) roleplayServer.close()
   delete process.env.DSH_HOME
 })
 
@@ -678,8 +669,72 @@ describe('音色克隆路由', () => {
 })
 
 describe('角色扮演路由', () => {
-  /** 一段带台词的回答：旁白 - 台词 - 旁白。 */
+  /** 一段带台词的回答：旁白- 台词 - 旁白。 */
   const SCRIPT = '他抬起头。「你来了。」他笑了笑。'
+
+  /** 两套绑给角色的音色档案；档案 id 才是绑定值，音色 ID 是档案里的内容。 */
+  let narration
+  let character
+
+  before(async () => {
+    // 绑定的是**档案 id** 而不是音色 ID —— 档案是"模型 + 音色"的完整单位，而音色
+    // ID 单独一个字段定不了一套音色（MiMo 复刻音色压根没有 ID）。所以这里先把两套
+    // 档案真的写进清单，再让配置去引用它们的 id。
+    const { VoiceProfiles } = await import('../host/profiles.js')
+    const profiles = new VoiceProfiles()
+    // 档案清单是三台共享的一份 JSON，所以"当前音色"也是共享的。而**第一套档案会自动
+    // 成为当前音色** —— 于是这里先建一套与设置回退值同名的档案，把"当前音色"占住；
+    // 否则旁白那套会顶上去，本该用`voice-1` 的那几个用例（roleplay:false、档案查不到
+    // 时的回落）就全都跟着变了。
+    profiles.put({ name: '当前音色', voiceId: 'voice-1', model: 'cosyvoice-v3.5-plus' })
+    narration = profiles.put({
+      name: '旁白音色',
+      voiceId: 'voice-narration',
+      model: 'cosyvoice-v3.5-plus',
+    })
+    character = profiles.put({
+      name: '台词音色',
+      voiceId: 'voice-character',
+      model: 'cosyvoice-v3.5-plus',
+    })
+
+    // 这一台是**最后**才挂的：档案清单是三台共享的一份 JSON（`~/.dsh/voice/profiles.json`），
+    // 提前建档案会污染前面那些"清单为空"的用例。
+    const plugin = await import('../host/index.js')
+    const routes = []
+    const ctx = {
+      effect: (fn) => { fn(); return () => {} },
+      webServer: { register: (route) => { routes.push(route); return () => {} } },
+      logger: { warn: () => {} },
+    }
+    plugin.apply(ctx, {
+      apiKey: 'sk-test',
+      voiceId: 'voice-1',
+      model: 'cosyvoice-v3.5-plus',
+      outputDir: join(home, 'audio-roleplay'),
+      bootSound: true,
+      mode: 'one-shot',
+      roleplay: true,
+      narrationProfileId: narration.id,
+      characterProfileId: character.id,
+    })
+
+    roleplayServer = createServer((req, res) => {
+      const path = new URL(req.url ?? '/', 'http://localhost').pathname
+      const route = routes.find(candidate => candidate.path === path)
+      if (route === undefined) {
+        res.writeHead(404).end()
+        return
+      }
+      Promise.resolve(route.handler(req, res)).catch(() => { res.destroy() })
+    })
+    await new Promise((resolveListen) => { roleplayServer.listen(0, '127.0.0.1', resolveListen) })
+    roleplayBase = `http://127.0.0.1:${String(roleplayServer.address().port)}`
+  })
+
+  after(() => {
+    if (roleplayServer !== undefined) roleplayServer.close()
+  })
 
   /** 往某一台服务器的 /speak 发一次请求。 */
   async function speakAt(target, body) {
@@ -701,7 +756,27 @@ describe('角色扮演路由', () => {
     const spoken = await speakAt(roleplayBase, { text: SCRIPT })
     assert.equal(spoken.ok, true)
     assert.equal(spoken.mode, 'one-shot')
-    // 三段，且音色是 旁白 / 台词 / 旁白。
+    // 三段，且音色来自各自那份档案的音色 ID（档案才是绑定值）。
+    assert.deepEqual(voicesAsked(), ['voice-narration', 'voice-character', 'voice-narration'])
+  })
+
+  it('两套档案可以来自不同模型——绑定的是档案而不是音色 ID', async () => {
+    // 把台词那份换成另一款模型（仍是百炼，于是请求形状不变、断言仍读得到 voice）。
+    const { VoiceProfiles } = await import('../host/profiles.js')
+    const profiles = new VoiceProfiles()
+    const swapped = profiles.put({
+      id: character.id,
+      model: 'cosyvoice-v3.5-flash',
+    })
+    assert.equal(swapped.model, 'cosyvoice-v3.5-flash')
+    // 旁白那份没动：档案内只给了 model 一个字段，voiceId 保留原值。
+    assert.equal(profiles.list().find(item => item.id === narration.id).voiceId, 'voice-narration')
+
+    await speakAt(roleplayBase, { text: SCRIPT })
+    const asked = speakCalls.map(call => JSON.parse(String(call.init.body)))
+    assert.equal(asked[0].model, 'cosyvoice-v3.5-plus')
+    assert.equal(asked[1].model, 'cosyvoice-v3.5-flash')
+    // 换模型并没有换音色：这套音色仍然念自己的那句话。
     assert.deepEqual(voicesAsked(), ['voice-narration', 'voice-character', 'voice-narration'])
   })
 
@@ -710,7 +785,7 @@ describe('角色扮演路由', () => {
     assert.equal(spoken.clip.name.endsWith('.wav'), true)
     const audio = await realFetch(`${roleplayBase}${spoken.clip.url}`)
     const bytes = Buffer.from(await audio.arrayBuffer())
-    // WAV 头之后应当是三段 FAKE 音频按原文顺序相接 —— 顺序就写在字节里。
+    // WAV 头之后应当是三段FAKE 音频按原文顺序相接 —— 顺序就写在字节里。
     assert.equal(bytes.subarray(0, 4).toString(), 'RIFF')
     assert.equal(bytes.length, 44 + 3 * FAKE_AUDIO.length)
   })
@@ -731,13 +806,28 @@ describe('角色扮演路由', () => {
     assert.equal(speakCalls.length, 3)
   })
 
-  it('请求里的音色覆盖配置里的绑定', async () => {
+  it('请求里的档案覆盖配置里的绑定', async () => {
+    // 请求里给的是**档案 id**，所以要先有这两套档案；给不存在的 id 会静默回落当前音色
+    // （见下一个用例），不会拿一个查不到的档案去报错。
+    const { VoiceProfiles } = await import('../host/profiles.js')
+    const profiles = new VoiceProfiles()
+    const reqNarration = profiles.put({ name: '临时旁白', voiceId: 'req-narration', model: 'cosyvoice-v3.5-plus' })
+    const reqCharacter = profiles.put({ name: '临时台词', voiceId: 'req-character', model: 'cosyvoice-v3.5-plus' })
+
     await speakAt(roleplayBase, {
       text: SCRIPT,
-      narrationVoiceId: 'req-narration',
-      characterVoiceId: 'req-character',
+      narrationProfileId: reqNarration.id,
+      characterProfileId: reqCharacter.id,
     })
     assert.deepEqual(voicesAsked(), ['req-narration', 'req-character', 'req-narration'])
+
+    // 档案不存在 → 静默跟随当前音色，而不是让整次朗读失败。
+    await speakAt(roleplayBase, {
+      text: SCRIPT,
+      narrationProfileId: 'p_不存在的档案',
+      characterProfileId: 'p_也不存在',
+    })
+    assert.deepEqual(voicesAsked(), ['voice-1'])
   })
 
   it('没有台词时不分段', async () => {
@@ -745,11 +835,13 @@ describe('角色扮演路由', () => {
     assert.deepEqual(voicesAsked(), ['voice-narration'])
   })
 
-  it('/status 回报角色扮演开关与两个绑定音色', async () => {
+  it('/status 回报角色扮演开关与两个绑定的档案 id', async () => {
     const body = await json(await realFetch(`${roleplayBase}/dsh-cosyvoice/status`))
     assert.equal(body.roleplay, true)
-    assert.equal(body.narrationVoiceId, 'voice-narration')
-    assert.equal(body.characterVoiceId, 'voice-character')
+    assert.equal(body.narrationProfileId, narration.id)
+    assert.equal(body.characterProfileId, character.id)
+    // 回报的是档案 id，所以界面上能显示档案名称，而不是一串看不懂的 id。
+    assert.notEqual(body.narrationProfileId, 'voice-narration')
 
     // 问"按关闭来算"：回报的应当是那一次会真正生效的值。
     const off = await json(await realFetch(`${roleplayBase}/dsh-cosyvoice/status?roleplay=false`))

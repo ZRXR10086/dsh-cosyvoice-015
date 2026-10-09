@@ -22,12 +22,13 @@
 import { fileURLToPath } from 'node:url'
 import { requireHarnessModule } from './harness.js'
 import { voiceSettingsSchema, VOICE_NAMESPACE } from './settings.js'
+import { SpeechEngine } from './engine.js'
 import { AudioStore } from './store.js'
-import { SpeechClient } from './speech.js'
 import { VoiceSynthesizer } from './synth.js'
 import { MessageTextResolver } from './texts.js'
 import { VoiceProfiles } from './profiles.js'
 import { VoiceCloner } from './clone.js'
+import { VoiceSamples } from './samples.js'
 import { cosyvoiceRoutes } from './routes.js'
 
 /** 稳定的 cordis 插件名。 */
@@ -133,16 +134,22 @@ export function apply(ctx, config) {
   registerSettingsNamespace(ctx)
 
   const store = new AudioStore(() => settings().outputDir)
-  const speech = new SpeechClient({ getSettings: settings })
+  // 本地音色样本仓库：MiMo 的音色复刻没有"音色 ID"可持有（参考音频随每次请求附上），
+  // 所以上传时把音频原样留在这里，之后每次合成都重新附在请求里 —— 这就是"复用"。
+  const samples = new VoiceSamples()
+  // 合成引擎按音色绑定的模型分发：百炼 CosyVoice 走它自己那套请求形状，MiMo 走
+  // OpenAI 兼容那套（文本放 assistant 消息、复刻音色放 audio.voice 的 data URL）。
+  const speech = new SpeechEngine({ getSettings: settings, samples })
   const texts = new MessageTextResolver({ log })
   // 音色档案自管一个 JSON（理由见 ./profiles.js 头注释），所以它不在 cordis 的
   // 配置面里，也就不会随着配置重载被重建 —— 挂载/重载插件不该动用户的音色清单。
   const profiles = new VoiceProfiles()
-  const synth = new VoiceSynthesizer({ speech, store, getSettings: settings, profiles, log })
+  const synth = new VoiceSynthesizer({ speech, store, getSettings: settings, profiles, samples, log })
   const cloner = new VoiceCloner({ getSettings: settings })
 
   try {
     store.ensure()
+    samples.ensure()
   } catch (error) {
     log(`无法创建音频目录 ${store.dir()}：${error instanceof Error ? error.message : String(error)}`)
   }
@@ -154,6 +161,7 @@ export function apply(ctx, config) {
     texts,
     profiles,
     cloner,
+    samples,
     bootClip: fileURLToPath(new URL('../assets/boot.mp3', import.meta.url)),
     log,
     openDir: revealDirectory,

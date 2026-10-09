@@ -38,17 +38,34 @@ export function normalizeMode(raw) {
   return String(raw ?? '').trim() === MODE_STREAM ? MODE_STREAM : MODE_ONE_SHOT
 }
 
-/** 承载百炼 API Key 的字段。密钥：在所有通道上脱敏。 */
+/**
+ * 承载百炼 API Key 的字段。密钥：在所有通道上脱敏。 */
 export const API_KEY_FIELD = 'apiKey'
+
+/**
+ * 承载 MiMo API Key 的字段。密钥：在所有通道上脱敏。
+ *
+ * 与百炼的 Key 是**两个独立的凭据**：小米 MiMo 开放平台的 Key 以别的形式签发，
+ * 两边互不通用。所以它不能复用 `apiKey` —— 否则填了百炼的 Key 去调 MiMo，用户看到的
+ * 是"API Key 无效"，而真正的原因是"你填的是别家的 Key"。
+ */
+export const MIMO_API_KEY_FIELD = 'mimoApiKey'
 
 /** 角色扮演模式：把回答拆成旁白与台词，分别用不同音色合成。 */
 export const ROLEPLAY_FIELD = 'roleplay'
 
-/** 旁白音色的配置字段。 */
-export const NARRATION_VOICE_FIELD = 'narrationVoiceId'
+/**
+ * 旁白音色的配置字段：存的是**音色档案的 id**，不是音色 ID。
+ *
+ * v3 存的是音色 ID，而"音色 ID + 模型"两者绑在一起才是完整的音色 —— 只存 ID 的话，
+ * 同一把嗓子在两套引擎下的配置无法区分（MiMo 复刻音色压根没有 ID，只有一个本地样本
+ * 文件名）。改存档案 id 之后，"选哪个音色"就是"选哪套档案"，模型自然跟着走。
+ * @type {string}
+ */
+export const NARRATION_VOICE_FIELD = 'narrationProfileId'
 
-/** 角色（台词）音色的配置字段。 */
-export const CHARACTER_VOICE_FIELD = 'characterVoiceId'
+/** 角色（台词）音色的配置字段：同样是音色档案的 id。 */
+export const CHARACTER_VOICE_FIELD = 'characterProfileId'
 
 /**
  * 归一化一个开关型配置值。
@@ -70,11 +87,20 @@ export function normalizeFlag(raw) {
  */
 export function voiceSettingsSchema(z) {
   return z.object({
-    /** 阿里云百炼 API Key（`sk-...`）。密钥字段。 */
+    /** 阿里云百炼 API Key（`sk-...`）。密钥字段。只用于 CosyVoice 那几款模型。 */
     apiKey: z.string().role('secret').default(''),
-    /** 合成模型；与音色注册模型不一致会让引擎直接拒绝请求。 */
+    /** 小米 MiMo 开放平台 API Key。密钥字段。只用于 MiMo-V2.5-TTS 系列。 */
+    mimoApiKey: z.string().role('secret').default(''),
+    /**
+     * 回退合成模型。
+     *
+     * **只在"一套音色档案都没有"时才用它**（见 `./models.js` 里模型与音色绑定这件事）。
+     * 设置页不再暴露这个字段 —— 用户选哪个音色就自动用哪个模型，模型是音色的属性而不是
+     * 一个全局开关。它仍然留在 schema 里，是为了兼容 v1~v3 写下的配置文件：schemastery
+     * 遇到未知键会报错，而老用户的 settings.yaml 里就有这一行。
+     */
     model: z.string().default(DEFAULT_MODEL),
-    /** 百炼控制台里的复刻/设计音色 ID。 */
+    /** 百炼控制台里的复刻/设计音色 ID；同样只在没有档案时作为回退。 */
     voiceId: z.string().default(''),
     /** 合成音频的落盘目录。留空表示使用插件自己在 harness home 下的目录。 */
     outputDir: z.string().default(''),
@@ -90,9 +116,9 @@ export function voiceSettingsSchema(z) {
      * 用不同音色合成，再按原文顺序拼成一条音频。
      */
     roleplay: z.boolean().default(false),
-    /** 旁白的音色 ID；留空表示跟随当前音色（激活的档案）。 */
-    narrationVoiceId: z.string().default(''),
-    /** 角色台词的音色 ID；留空表示跟随当前音色。 */
-    characterVoiceId: z.string().default(''),
+    /** 旁白用的音色档案 id；留空表示跟随当前音色（激活的档案）。 */
+    narrationProfileId: z.string().default(''),
+    /** 角色台词用的音色档案 id；留空表示跟随当前音色。 */
+    characterProfileId: z.string().default(''),
   })
 }

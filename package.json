@@ -1,7 +1,7 @@
 {
   "name": "dsh-cosyvoice",
-  "version": "3.0.0",
-  "description": "【dsh 0.1.5-rc.2 兼容版】为 DeepSeek Harness 网页界面的每条 AI 回答加一个语音播放键：点击即用阿里云百炼 CosyVoice 音色朗读该回答。V2 增加音色档案、音色克隆（上传音频自动获得音色 ID）；v2.1 提供实时（流式）与非实时（整段）两种合成方式；v3.0 增加角色扮演模式，把「」里的台词与其余旁白拆开，用两种音色分别合成后按原文顺序拼回一条音频。功能与主线 v3.0.0 一致，区别只在宿主-facing 的适配层：0.1.5 需要自行 settings.register 登记设置面，浏览器端用 settingsScope 而非 configForms。",
+  "version": "4.0.0",
+  "description": "【dsh 0.1.5-rc.2 兼容版】为 DeepSeek Harness 网页界面的每条 AI 回答加一个语音播放键：点击即用你选中的音色朗读该回答。V2 增加音色档案与音色克隆；v2.1 提供实时（流式）与非实时（整段）两种合成方式；v3.0 增加角色扮演模式，把「」里的台词与其余旁白拆开，用两种音色分别合成后按原文顺序拼回一条音频；v4.0 接入小米 MiMo V2.5 TTS 三款模型，并把模型改为每套音色档案自带（设置页不再有全局模型选择器，模型选择全部是列表，MiMo 内置音色可勾选添加）。MiMo 的音色复刻只针对单次调用，因此参考音频存在本机 ~/.dsh/voice/samples，每次合成时附带上传以实现复用。宿主-facing 的适配层与主线不同：0.1.5 需要自行 settings.register 登记设置面，浏览器端用 settingsScope 而非 configForms。",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -11,7 +11,8 @@
     "plugin",
     "voice",
     "tts",
-    "cosyvoice"
+    "cosyvoice",
+    "mimo"
   ],
   "main": "host/index.js",
   "files": [
@@ -36,7 +37,8 @@
   "scripts": {
     "build": "node build.mjs",
     "verify": "node verify.mjs",
-    "test": "node --test \"test/*.test.mjs\" && node build.mjs && node verify.mjs"
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:all": "node --test \"test/*.test.mjs\" && node build.mjs && node verify.mjs"
   },
   "dsh": {
     "bundle": {

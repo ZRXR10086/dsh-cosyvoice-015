@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dshHome } from './harness.js'
+import { isMimo, KIND_CLONE, kindOf } from './models.js'
 
 /**
  * 缓存文件名：`<64位十六进制>.mp3` 或 `.wav`。
@@ -52,14 +53,37 @@ export function mimeOf(name) {
 }
 
 /**
+ * 一段合成请求里的"音色凭据"是什么。
+ *
+ * 百炼的音色凭据是音色 ID；MiMo 复刻音色的凭据是**本地样本文件**（它没有音色 ID 可
+ * 持有）。两者不能互相顶替，所以这里按模型的音色来源分别取——见 `./models.js` 的
+ * `kindOf`。
+ *
+ * @param part - 一段合成请求。
+ * @returns 用于缓存键与可用性判定的音色凭据。
+ */
+function voiceKeyOf(part) {
+  return kindOf(part?.model) === KIND_CLONE && isMimo(part?.model)
+    ? `${String(part?.sample ?? '').trim()}\u0003${String(part?.sampleFingerprint ?? '').trim()}`
+    : String(part?.voiceId ?? '').trim()
+}
+
+/**
  * 计算缓存键。
+ *
+ * 第三个参数可以是**一段合成请求**或一段文本。传请求对象时，音色凭据按
+ * {@link voiceKeyOf} 取，并额外带上样本内容指纹 —— 否则用户换了参考音频
+ * （文件名不变）却命中用旧音频合出来的缓存，那种 bug 极难发现，因为一切看起来都成功。
  * @param model - 合成模型。
- * @param voiceId - 音色 ID。
- * @param text - 已清洗的文本。
+ * @param voice - 音色 ID、段文本，或一段合成请求。
+ * @param text - 已清洗的文本（`voice` 传文本时必填）。
  * @returns 64 位十六进制字符串。
  */
-export function cacheKeyOf(model, voiceId, text) {
-  return createHash('sha256').update(`${model}\n${voiceId}\n${text}`, 'utf8').digest('hex')
+export function cacheKeyOf(model, voice, text) {
+  const isPart = voice !== null && typeof voice === 'object'
+  const voiceKey = isPart ? voiceKeyOf(voice) : String(voice ?? '').trim()
+  const body = isPart ? String(voice.text ?? '') : String(text ?? '')
+  return createHash('sha256').update(`${model}\n${voiceKey}\n${body}`, 'utf8').digest('hex')
 }
 
 /**
@@ -75,7 +99,7 @@ export function cacheKeyOf(model, voiceId, text) {
  */
 export function cacheKeyOfParts(parts) {
   const seed = parts
-    .map(part => `${part.kind}\u0001${part.model}\u0001${part.voiceId}\u0001${part.text}`)
+    .map(part => `${part.kind}\u0001${part.model}\u0001${voiceKeyOf(part)}\u0001${part.text}`)
     .join('\u0002')
   return createHash('sha256').update(seed, 'utf8').digest('hex')
 }

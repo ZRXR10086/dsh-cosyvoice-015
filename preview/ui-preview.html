@@ -46,6 +46,10 @@
 
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
+  /* `hidden` 属性靠的是 UA 样式表里的 `display: none`，而下面给 `.line` / `.note`
+     这些元素显式写了 `display: flex`，作者样式赢过 UA 样式 —— 于是 `el.hidden = true`
+     会"设置成功但仍然显示"。这一条把所有 hidden 元素拉回不可见。 */
+  [hidden] { display: none !important; }
   body {
     background: var(--bg);
     color: var(--fg);
@@ -191,6 +195,9 @@
     gap: 8px; font-size: 12px; color: var(--fg-faint); margin-top: 9px;
   }
   .line b { color: var(--fg); font-weight: 600; }
+  /* 右列会放"名称 · 模型"这样的长串，允许换行而不是把左列的标签挤没。 */
+  .line > span:last-child { text-align: right; min-width: 0; }
+  .line > span:last-child b { overflow-wrap: anywhere; }
   .pill {
     font-size: 11px; padding: 1px 7px; border-radius: 999px;
     border: 1px solid var(--line); color: var(--fg-dim);
@@ -217,6 +224,48 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .voice .k { font-size: 11px; color: var(--fg-faint); }
+
+  /* 引擎徽章：让"这套音色走哪家"一眼可见，而不是读完模型名才知道 */
+  .tag-engine {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px; flex: 0 0 auto;
+    border: 1px solid var(--line); color: var(--fg-faint);
+  }
+  .tag-engine[data-e='mimo'] { border-color: #8f6bff; color: #b39bff; }
+  html[data-theme='light'] .tag-engine[data-e='mimo'] { color: #6d47d9; }
+  .tag-engine[data-e='dashscope'] { border-color: #4d8dff; color: #7fb0ff; }
+  html[data-theme='light'] .tag-engine[data-e='dashscope'] { color: #2f6fe4; }
+
+  /* 模型下拉：v4.0 起模型只在"新增/克隆音色"里选，且是列表而非自由输入 */
+  .model-sel { margin-top: 8px; }
+  .field-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--fg-faint); margin-top: 10px;
+  }
+  .field-label .pill { flex: 0 0 auto; }
+  .txt {
+    width: 100%; height: 32px; margin-top: 4px; padding: 0 9px;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: transparent; color: var(--fg); font: inherit; font-size: 13px;
+  }
+  .txt:focus { outline: none; border-color: var(--accent); }
+  .txt::placeholder { color: var(--fg-faint); }
+  /* 下拉里的选项文字很长（"名称（模型 id）"），不裁一下会撑破侧栏。 */
+  .sel { text-overflow: ellipsis; }
+  .warn-line {
+    font-size: 12px; color: var(--danger); margin-top: 8px; line-height: 1.5;
+  }
+
+  /* 内置音色：勾选式列表（v4.0 新增） */
+  .builtin {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line-soft); background: transparent; margin-bottom: 5px;
+    font-size: 13px; text-align: left; transition: all .12s;
+  }
+  .builtin:hover { background: var(--bg-bubble); }
+  .builtin input { accent-color: var(--accent); margin: 0; flex: 0 0 auto; }
+  .builtin[data-lang='en'] { color: var(--fg-dim); }
+  .builtin .tick { margin-left: auto; font-size: 11px; color: var(--ok); }
 
   .btn {
     width: 100%; height: 34px; border-radius: 8px; cursor: pointer;
@@ -279,7 +328,7 @@
   <main class="chat">
     <div class="topbar">
       <span class="title">语音插件联调</span>
-      <span class="tag">dsh-cosyvoice 3.0.0</span>
+      <span class="tag">dsh-cosyvoice 4.0.0</span>
       <span class="spacer"></span>
       <button class="ghost" id="btn-theme">切换主题</button>
       <button class="ghost" id="btn-toggle" data-on="1">收起侧边栏</button>
@@ -306,6 +355,23 @@
 
     <div class="sb-body">
       <div class="card">
+        <h4>API Key</h4>
+        <p>两家引擎各一把：只用其中一家，另一把留空即可。</p>
+        <label class="field-label" for="key-bailian">百炼 API Key<span class="pill">CosyVoice 系列</span></label>
+        <input class="txt" id="key-bailian" type="password" placeholder="sk-...（阿里云百炼控制台获取）">
+        <label class="field-label" for="key-mimo">MiMo API Key<span class="pill">MiMo V2.5 TTS</span></label>
+        <input class="txt" id="key-mimo" type="password" placeholder="sk-...（小米 MiMo 开放平台获取）">
+      </div>
+
+      <div class="card">
+        <h4>当前音色与模型</h4>
+        <p>音色与模型是绑在一起的：选哪套音色，就用它自己绑定的那款模型合成。设置里<b>没有</b>全局的模型选择。</p>
+        <div class="line"><span>当前音色</span><span><b id="now-voice">—</b></span></div>
+        <div class="line"><span>使用模型</span><span><b id="now-model">—</b> <span class="tag-engine" id="now-engine" data-e="">—</span></span></div>
+        <div class="line" id="now-latency-row" hidden><span>流式</span><span><span class="pill warn" id="now-latency">非低延迟</span></span></div>
+      </div>
+
+      <div class="card">
         <h4>合成方式</h4>
         <p>非实时：整段一次合成好再出声。实时：按句边合成边播，第一句好了就响。</p>
         <div class="seg">
@@ -325,7 +391,7 @@
 
       <div class="card">
         <h4>角色扮演</h4>
-        <p>开启后，「」里的算台词、其余算旁白。两者用各自的音色合成，再按原文顺序拼成一条。</p>
+        <p>开启后，「」里的算台词、其余算旁白。两者用各自的音色档案合成，再按原文顺序拼成一条。</p>
         <div class="seg">
           <button id="rp-off" aria-pressed="true">关闭</button>
           <button id="rp-on" aria-pressed="false">开启</button>
@@ -334,21 +400,41 @@
         <select id="rp-narration" class="sel"></select>
         <div class="line"><span>角色音色</span></div>
         <select id="rp-character" class="sel"></select>
-        <div class="note">没绑定就跟随当前音色。台词统一用同一个角色音色（一段话里多个角色暂不区分）。</div>
+        <div class="note">绑的是<b>整套档案（含模型）</b>，所以旁白与角色可以是不同引擎的声音。没绑定就跟随当前音色。台词统一用同一个角色音色（一段话里多个角色暂不区分）。</div>
       </div>
 
       <div class="card">
         <h4>音色档案</h4>
-        <p>点一条即用。选中的音色对接下来的每次朗读生效。</p>
+        <p>一套档案 = 一个音色 + 一款模型。点一条即用，选中的音色对接下来的每次朗读生效。</p>
         <div id="voices"></div>
+
+        <div id="add-form">
+          <label class="field-label" for="add-model">模型（决定下面要填什么）</label>
+          <select id="add-model" class="sel model-sel"></select>
+          <label class="field-label" for="add-name">名称</label>
+          <input class="txt" id="add-name" placeholder="例如「我的声音」">
+          <div id="add-voice-field"></div>
+          <button class="btn primary" id="btn-add" style="margin-top:10px">新增音色</button>
+          <div class="warn-line" id="add-error" hidden></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>MiMo 内置音色</h4>
+        <p>这几把嗓子是 MiMo 自带的，勾选后一键加进档案——不用复刻，也不用填 ID。</p>
+        <div id="builtins"></div>
+        <button class="btn" id="btn-add-builtin" disabled>添加选中的</button>
+        <div class="note" id="builtin-note" hidden></div>
       </div>
 
       <div class="card">
         <h4>音色克隆</h4>
-        <p>上传 10–20 秒 WAV，插件自动创建音色并轮询到就绪。</p>
-        <button class="btn primary" id="btn-clone">选择本地音频</button>
+        <p>上传 10–20 秒清晰人声。<b>选百炼模型</b>会在云端复刻（要等部署）；<b>选 MiMo 模型</b>则把音频存在本机，每次合成都附带上传，可以反复复用。</p>
+        <label class="field-label" for="clone-model">复刻用的模型</label>
+        <select id="clone-model" class="sel model-sel"></select>
+        <button class="btn primary" id="btn-clone" style="margin-top:10px">选择本地音频</button>
         <button class="btn" id="btn-clone-demo">用示例音频演示</button>
-        <input type="file" id="file" accept="audio/*" hidden>
+        <input type="file" id="file" accept="audio/wav,audio/mpeg" hidden>
         <div class="bar" id="clone-bar" hidden><i></i></div>
         <div class="line" id="clone-state" hidden><span id="clone-text"></span></div>
       </div>
@@ -363,6 +449,7 @@
         <h4>上一次朗读</h4>
         <div class="stat"><span>模式</span><b id="s-mode">—</b></div>
         <div class="stat"><span>音色</span><b id="s-voice">—</b></div>
+        <div class="stat"><span>模型</span><b id="s-model">—</b></div>
         <div class="stat"><span>首包延迟</span><b id="s-first">—</b></div>
         <div class="stat"><span>音频时长</span><b id="s-dur">—</b></div>
         <div class="stat"><span>段落</span><b id="s-chunks">—</b></div>
@@ -480,25 +567,92 @@ function saveMode(value) {
 
 var mode = readMode();
 
+/* ══════════════════════════════════════════════════════════════════
+   2a. 模型目录
+   ── 真插件里这一份由 GET /models 提供，前端不复制；预览页离线，所以只在下面
+      抄一份。**抄的时候必须与 host/models.js 的 MODELS 逐条一致**
+      —— 两份对不上的后果不是"预览和真身长得不同"，而是预览里看着能选
+      的模型，真机上根本不存在，而症状要到合成时才报 404。
+      改真身目录时记得回来同步（冒烟会断言项数与关键 id）。
+   ── streaming=false 的两款流式是"兼容模式"：要等整段合成完才出声。
+   ══════════════════════════════════════════════════════════════ */
+
+var MODELS = [
+  { id: 'cosyvoice-v3.5-plus',         provider: 'dashscope', kind: 'clone',  streaming: true,  label: 'CosyVoice v3.5 Plus' },
+  { id: 'cosyvoice-v3.5-flash',        provider: 'dashscope', kind: 'clone',  streaming: true,  label: 'CosyVoice v3.5 Flash' },
+  { id: 'cosyvoice-v3-plus',            provider: 'dashscope', kind: 'clone',  streaming: true,  label: 'CosyVoice v3 Plus' },
+  { id: 'cosyvoice-v3-flash',           provider: 'dashscope', kind: 'clone',  streaming: true,  label: 'CosyVoice v3 Flash' },
+  { id: 'cosyvoice-v2',                 provider: 'dashscope', kind: 'clone',  streaming: true,  label: 'CosyVoice v2' },
+  { id: 'cosyvoice-v1',                 provider: 'dashscope', kind: 'clone',  streaming: true,  label: 'CosyVoice v1' },
+  { id: 'mimo-v2.5-tts',                provider: 'mimo',      kind: 'preset', streaming: true,  label: 'MiMo V2.5 TTS' },
+  { id: 'mimo-v2.5-tts-voiceclone',     provider: 'mimo',      kind: 'clone',  streaming: false, label: 'MiMo V2.5 TTS 音色克隆' },
+  { id: 'mimo-v2.5-tts-voicedesign',    provider: 'mimo',      kind: 'design', streaming: false, label: 'MiMo V2.5 TTS 音色设计' },
+];
+
+/** @param id - 模型 id。 @returns 那一条；查不到时回落到第一个。 */
+function modelOf(id) {
+  for (var i = 0; i < MODELS.length; i++) if (MODELS[i].id === id) return MODELS[i];
+  return MODELS[0];
+}
+
+/**
+ * 把模型名附在音色名末尾。
+ *
+ * 这是 v4.0 的核心：模型不再是设置里一个独立的选项，而是**每套音色自带**的。
+ * 所以名称后面必须挂着它——否则列表里两条都用「龙小淳」，用户根本不知道哪条
+ * 走的是哪款模型。
+ */
+function decorate(name, modelId) {
+  return name + ' · ' + modelId;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2b. 音色档案：一套 = 音色 + 模型
+   ── source: preset（预置/内置）· cloud（云端）· clone（复刻）· design（设计）
+   ══════════════════════════════════════════════════════════════ */
+
 var voices = [
-  { id: 'longxiaochun', name: '龙小淳（女·温柔）', model: 'cosyvoice-v3.5-plus', base: 232, kind: '预置' },
-  { id: 'longxiaoxia',  name: '龙小夏（女·活泼）', model: 'cosyvoice-v3.5-plus', base: 268, kind: '预置' },
-  { id: 'longlaotie',   name: '龙老铁（男·沉稳）', model: 'cosyvoice-v3.5-plus', base: 124, kind: '预置' },
+  { id: 'p_longxiaochun', voiceId: 'longxiaochun', name: '龙小淳（女·温柔）',
+    model: 'cosyvoice-v3.5-plus', base: 232, source: 'preset', status: 'ready' },
+  { id: 'p_longxiaoxia', voiceId: 'longxiaoxia', name: '龙小夏（女·活泼）',
+    model: 'cosyvoice-v3.5-plus', base: 268, source: 'preset', status: 'ready' },
+  { id: 'p_longlaotie', voiceId: 'longlaotie', name: '龙老铁（男·沉稳）',
+    model: 'cosyvoice-v3.5-flash', base: 124, source: 'preset', status: 'ready' },
 ];
 var voiceId = voices[0].id;
 
-function voice() {
-  for (var i = 0; i < voices.length; i++) if (voices[i].id === voiceId) return voices[i];
-  return voices[0];
+/** @param id - 档案 id（不是音色 ID）。 @returns 档案；没这条时 undefined。 */
+function profileById(id) {
+  for (var i = 0; i < voices.length; i++) if (voices[i].id === id) return voices[i];
+  return undefined;
 }
+
+/** @returns 当前激活的档案。 */
+function voice() {
+  return profileById(voiceId) || voices[0];
+}
+
+/** @returns 档案的显示名（含模型后缀）。 */
+function labelOf(v) {
+  return decorate(v.name, v.model);
+}
+
+var SOURCE_LABEL = {
+  preset: '预置',
+  cloud: '云端',
+  clone: '克隆',
+  design: '设计',
+};
 
 /* ══════════════════════════════════════════════════════════════════
    2b. 角色扮演：开关 + 两个音色绑定 + 文本切分
    ══════════════════════════════════════════════════════════════ */
 
 var RP_KEY = 'dsh-cosyvoice.roleplay';
-var NAR_KEY = 'dsh-cosyvoice.narrationVoice';
-var CHAR_KEY = 'dsh-cosyvoice.characterVoice';
+// 键名存的是**档案 id**（与 client/shared.js 的 narrationProfile / characterProfile
+// 同名同义）：绑音色 ID 的话，"这套音色用哪款模型"这一半信息就丢了。
+var NAR_KEY = 'dsh-cosyvoice.narrationProfile';
+var CHAR_KEY = 'dsh-cosyvoice.characterProfile';
 
 /** localStorage 不可用时的兜底。 */
 var prefMemory = {};
@@ -531,20 +685,28 @@ var roleplay = readPref(RP_KEY) === 'true';
 var narrationId = readPref(NAR_KEY) === null ? '' : readPref(NAR_KEY);
 var characterId = readPref(CHAR_KEY) === null ? '' : readPref(CHAR_KEY);
 
-/** @param id - 音色 ID。 @returns 档案；没这条时 undefined。 */
-function byId(id) {
-  for (var i = 0; i < voices.length; i++) if (voices[i].id === id) return voices[i];
-  return undefined;
+/**
+ * 档案是否可用。
+ *
+ * 还在部署中的复刻音色不能选——选中一套注定失败的档案，比不显示它更糟。
+ * @param v - 档案。
+ * @returns 可用与否。
+ */
+function usable(v) {
+  if (v === undefined) return false;
+  if (v.status !== undefined && v.status !== '' && v.status !== 'ready') return false;
+  if (v.sample !== undefined && v.sample !== '') return true;
+  return String(v.voiceId || '') !== '' || String(v.designPrompt || '') !== '';
 }
 
-/** @returns 旁白用的音色：没绑定就跟随当前音色。 */
+/** @returns 旁白用的档案：没绑定（或绑定已失效）就跟随当前音色。 */
 function narrationVoice() {
-  return byId(narrationId) || voice();
+  return profileById(narrationId) || voice();
 }
 
-/** @returns 台词用的音色：没绑定就跟随当前音色。 */
+/** @returns 台词用的档案：没绑定（或绑定已失效）就跟随当前音色。 */
 function characterVoice() {
-  return byId(characterId) || voice();
+  return profileById(characterId) || voice();
 }
 
 var NARRATION = 'narration';
@@ -617,8 +779,11 @@ function mergeParts(parts) {
  *
  * 与插件里的取值顺序一致：绑定 > 当前音色。没绑定任何音色时，旁白和台词都是
  * 当前声音 —— 于是"开了角色扮演却没去绑音色"也不会变成没声音。
+ *
+ * 每段带的是**整套档案**，于是旁白与角色可以是不同引擎（一边百炼复刻、一边 MiMo
+ * 内置），各走各的模型。
  * @param text - 文本。
- * @returns 段序列，每段带 `voice`。
+ * @returns 段序列，每段带 `voice`（档案）。
  */
 function planParts(text) {
   if (!roleplay) return [{ kind: NARRATION, text: text, voice: voice() }];
@@ -681,8 +846,16 @@ async function speak(text, onFirst, onEnd) {
   var stat = {
     mode: mode,
     voice: multi
-      ? '旁白：' + narrationVoice().name + ' / 台词：' + characterVoice().name
-      : parts[0].voice.name,
+      ? '旁白：' + labelOf(narrationVoice()) + ' / 台词：' + labelOf(characterVoice())
+      : labelOf(parts[0].voice),
+    model: multi
+      ? narrationVoice().model + ' + ' + characterVoice().model
+      : parts[0].voice.model,
+    engine: multi
+      ? (modelOf(narrationVoice().model).provider === modelOf(characterVoice().model).provider
+        ? modelOf(narrationVoice().model).provider
+        : '两家引擎')
+      : modelOf(parts[0].voice.model).provider,
     first: 0,
     duration: 0,
     chunks: 0,
@@ -911,6 +1084,7 @@ function actionRow(id, text) {
 function renderStat(st) {
   document.getElementById('s-mode').textContent = st.mode === 'stream' ? '实时（流式）' : '非实时（整段）';
   document.getElementById('s-voice').textContent = st.voice;
+  document.getElementById('s-model').textContent = st.model;
   document.getElementById('s-first').textContent = st.first + ' ms';
   document.getElementById('s-dur').textContent = st.duration.toFixed(2) + ' s';
   // 角色扮演时"段落"比"分块数"有信息量：旁白几句、台词几句。
@@ -918,6 +1092,27 @@ function renderStat(st) {
     ? '旁白 ' + st.narration + ' · 台词 ' + st.dialogue
     : String(st.chunks);
   document.getElementById('s-chars').textContent = st.chars;
+}
+
+/* ── 当前音色与模型（对应真实设置页的 settings.modelEffective） ── */
+function paintNow() {
+  var v = voice();
+  var m = modelOf(v.model);
+  document.getElementById('now-voice').textContent = labelOf(v);
+  document.getElementById('now-model').textContent = m.id;
+
+  var tag = document.getElementById('now-engine');
+  tag.textContent = m.provider === 'mimo' ? 'MiMo' : '百炼';
+  tag.dataset.e = m.provider;
+
+  // 只有"选了实时 + 这款模型不是真低延迟"时才值得提示：那时用户会发现并没有更快。
+  var row = document.getElementById('now-latency-row');
+  row.hidden = mode !== 'stream' || m.streaming !== false;
+  if (!row.hidden) {
+    var pill = document.getElementById('now-latency');
+    pill.textContent = '非低延迟';
+    pill.title = '这款模型的流式是兼容模式，要等整段合成完才出声';
+  }
 }
 
 /* ── 角色扮演开关与两个音色绑定 ─────────────────────────────── */
@@ -932,9 +1127,12 @@ function paintRoleplay() {
 }
 
 /**
- * 填一个音色下拉：跟随当前音色 + 每一条档案。
+ * 填一个音色下拉：跟随当前音色 + 每一条**可用**档案。
+ *
+ * 列表里跳过还在部署 / 缺凭据的档案：绑定下拉是"选了就生效"的地方，把一套注定
+ * 失败的档案放进去，用户只能靠听错误消息才发现问题。
  * @param sel - 下拉元素。
- * @param current - 当前值。
+ * @param current - 当前值（档案 id）。
  */
 function fillVoiceSelect(sel, current) {
   sel.textContent = '';
@@ -943,12 +1141,14 @@ function fillVoiceSelect(sel, current) {
   follow.textContent = '跟随当前音色';
   sel.appendChild(follow);
   for (var i = 0; i < voices.length; i++) {
+    if (!usable(voices[i])) continue;
     var opt = document.createElement('option');
     opt.value = voices[i].id;
-    opt.textContent = voices[i].name;
+    opt.textContent = labelOf(voices[i]);
     sel.appendChild(opt);
   }
-  sel.value = current;
+  // 存的那套可能已经被删了：值要落回"跟随"，而不是让下拉显示空白。
+  sel.value = profileById(current) === undefined ? '' : current;
 }
 
 function fillVoiceSelects() {
@@ -1023,6 +1223,8 @@ function switchMode(target) {
   // 真插件在这里还会试着写回宿主配置；这个勾选框用来模拟"写不进去"的情况。
   var written = !mFail.checked;
   paintMode(written);
+  // 选了实时却用的是非低延迟模型时，"非低延迟"提示才该出现——所以这里要重画。
+  paintNow();
   render();
 }
 mOne.onclick = function () { switchMode('one-shot'); };
@@ -1035,6 +1237,7 @@ var voicesBox = document.getElementById('voices');
 function paintVoices() {
   voicesBox.textContent = '';
   voices.forEach(function (v) {
+    var m = modelOf(v.model);
     var b = document.createElement('button');
     b.type = 'button';
     b.className = 'voice';
@@ -1051,27 +1254,276 @@ function paintVoices() {
     a.textContent = v.name;
     var c = document.createElement('div');
     c.className = 'b';
-    c.textContent = v.id + ' · ' + v.model;
+    // 第二行是"凭据 + 模型"：模型名挂在末尾，于是"这套走哪款"不用点进去就知道。
+    c.textContent = (v.sample !== undefined && v.sample !== '' ? '参考音频 ' + v.sample + ' · ' : '')
+      + (v.designPrompt !== undefined && v.designPrompt !== '' ? '「' + v.designPrompt + '」 · ' : '')
+      + v.model;
     n.appendChild(a); n.appendChild(c);
     b.appendChild(n);
 
+    var eng = document.createElement('span');
+    eng.className = 'tag-engine';
+    eng.dataset.e = m.provider;
+    eng.textContent = m.provider === 'mimo' ? 'MiMo' : '百炼';
+    b.appendChild(eng);
+
     var k = document.createElement('span');
     k.className = 'k';
-    k.textContent = v.kind;
+    // 非低延迟流式值得单独标出来：这两款模型在"实时"下并不比非实时更快，
+    // 不说的话用户会以为是自己哪里设错了。
+    k.textContent = v.status === 'pending' ? '复刻中'
+      : v.status === 'failed' ? '失败'
+      : m.streaming === false ? '非低延迟'
+      : (SOURCE_LABEL[v.source] || '');
+    if (v.status === 'pending' || v.status === 'failed' || m.streaming === false) k.className = 'pill warn';
     b.appendChild(k);
 
-    b.onclick = function () { voiceId = v.id; paintVoices(); };
+    b.onclick = function () { voiceId = v.id; paintVoices(); paintNow(); fillVoiceSelects(); };
     voicesBox.appendChild(b);
   });
 }
 
-/* ── 克隆（模拟：上传 → 创建 → 轮询就绪 → 入列） ─────────────── */
+/* ── 新增音色：先选模型，表单跟着模型换 ─────────────────────── */
+var addModel = document.getElementById('add-model');
+var addName = document.getElementById('add-name');
+var addVoiceField = document.getElementById('add-voice-field');
+var addError = document.getElementById('add-error');
+
+/**
+ * 填模型下拉。
+ *
+ * **是列表而不是自由文本**：模型名是宿主认的那一组，手输就会输出一个服务端不认的
+ * 值，而症状要等到合成时才报 404。
+ * @param sel - 下拉元素。
+ * @param onlyKind - 只列这一类来源的模型；省略则全列。
+ */
+function fillModelSelect(sel, onlyKind) {
+  sel.textContent = '';
+  var first = '';
+  MODELS.forEach(function (m) {
+    if (onlyKind !== undefined && m.kind !== onlyKind) return;
+    var opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label + '（' + m.id + '）';
+    sel.appendChild(opt);
+    if (first === '') first = m.id;
+  });
+  return first;
+}
+
+/**
+ * 按所选模型换掉音色输入区。
+ *
+ * 三种音色来源要填的东西完全不同：内置音色填**名字**、复刻填**音色 ID**（MiMo 复刻
+ * 则根本没有 ID，音色就是那段音频）、设计填**一句描述**。所以输入区必须跟着模型走，
+ * 否则用户会在"给内置音色填音色 ID"这种无解的地方卡住。
+ */
+function paintAddVoiceField() {
+  var m = modelOf(addModel.value);
+  addVoiceField.textContent = '';
+
+  var label = document.createElement('label');
+  label.className = 'field-label';
+  addVoiceField.appendChild(label);
+
+  if (m.kind === 'preset') {
+    label.textContent = '内置音色';
+    var sel = document.createElement('select');
+    sel.className = 'sel';
+    sel.id = 'add-builtin-voice';
+    var none = document.createElement('option');
+    none.value = '';
+    none.textContent = '选一个内置音色';
+    sel.appendChild(none);
+    BUILTIN_VOICES.forEach(function (b) {
+      var opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = b.name;
+      sel.appendChild(opt);
+    });
+    addVoiceField.appendChild(sel);
+    return;
+  }
+
+  if (m.kind === 'clone' && m.provider === 'mimo') {
+    // MiMo 复刻没有可填的 ID：音色就是那段参考音频，所以这里只指路，不给输入框。
+    var note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = '这款模型的音色来自参考音频，请用下面的「音色克隆」上传。';
+    addVoiceField.appendChild(note);
+    return;
+  }
+
+  label.textContent = m.kind === 'design' ? '音色描述' : '音色 ID';
+  var input = document.createElement('input');
+  input.className = 'txt';
+  input.id = 'add-voice';
+  input.placeholder = m.kind === 'design'
+    ? '一句描述，例如「温柔知性的女声，语速偏慢」'
+    : '百炼控制台里复刻/设计的音色 ID';
+  addVoiceField.appendChild(input);
+}
+
+document.getElementById('btn-add').onclick = function () {
+  var m = modelOf(addModel.value);
+  var name = addName.value.trim();
+  var cred = document.getElementById('add-builtin-voice');
+  var typed = document.getElementById('add-voice');
+
+  if (name === '') { addError.textContent = '名称不能为空。'; addError.hidden = false; return; }
+  if (m.kind === 'preset' && (cred === null || cred.value === '')) {
+    addError.textContent = '选一个内置音色。'; addError.hidden = false; return;
+  }
+  if (m.kind === 'clone' && m.provider === 'mimo') {
+    addError.textContent = '这款模型的音色来自参考音频，请用下面的「音色克隆」上传。';
+    addError.hidden = false; return;
+  }
+  if (m.kind === 'design' && (typed === null || typed.value.trim() === '')) {
+    addError.textContent = '音色设计要写一句描述。'; addError.hidden = false; return;
+  }
+  if (m.kind !== 'design' && m.kind !== 'preset' && m.provider !== 'mimo'
+    && (typed === null || typed.value.trim() === '')) {
+    addError.textContent = '音色 ID 不能为空。'; addError.hidden = false; return;
+  }
+  addError.hidden = true;
+
+  voices.push({
+    id: 'p_new' + (voices.length + 1),
+    // 三种来源落在三个不同的字段，这与真实档案结构一致：
+    // 预置音色凭据就是**名字**（MiMo 的 audio.voice 直接收这个名字），
+    // 复刻是音色 ID（百炼）或本地样本文件名（MiMo），设计是一句描述。
+    voiceId: m.kind === 'preset'
+      ? (cred === null ? '' : cred.value)
+      : (typed === null ? '' : typed.value.trim()),
+    designPrompt: m.kind === 'design' && typed !== null ? typed.value.trim() : '',
+    name: name,
+    model: m.id,
+    builtin: m.kind === 'preset' && cred !== null ? cred.value : '',
+    base: 200 + voices.length * 20,
+    source: m.kind === 'design' ? 'design' : m.kind === 'clone' ? 'clone' : 'preset',
+    status: 'ready',
+  });
+  voiceId = voices[voices.length - 1].id;
+  addName.value = '';
+  paintVoices();
+  paintNow();
+  fillVoiceSelects();
+};
+
+addModel.onchange = function () {
+  addError.hidden = true;
+  // 换模型时把凭据清掉：上一款模型的音色对这一款多半无效，留着只会让人以为已经填好了。
+  var typed = document.getElementById('add-voice');
+  if (typed !== null) typed.value = '';
+  paintAddVoiceField();
+};
+
+/* ── MiMo 内置音色：勾选即添加 ─────────────────────────────── */
+var BUILTIN_VOICES = [
+  { id: 'mimo_default', name: 'mimo_default（默认）', lang: 'zh' },
+  { id: '冰糖', name: '冰糖', lang: 'zh' },
+  { id: '茉莉', name: '茉莉', lang: 'zh' },
+  { id: '苏打', name: '苏打', lang: 'zh' },
+  { id: '白桦', name: '白桦', lang: 'zh' },
+  { id: 'Mia', name: 'Mia', lang: 'en' },
+  { id: 'Chloe', name: 'Chloe', lang: 'en' },
+  { id: 'Milo', name: 'Milo', lang: 'en' },
+  { id: 'Dean', name: 'Dean', lang: 'en' },
+];
+
+var builtinsBox = document.getElementById('builtins');
+var btnAddBuiltin = document.getElementById('btn-add-builtin');
+var builtinNote = document.getElementById('builtin-note');
+
+function paintBuiltins() {
+  builtinsBox.textContent = '';
+  BUILTIN_VOICES.forEach(function (b) {
+    var already = voices.some(function (v) { return v.builtin === b.id; });
+    var label = document.createElement('label');
+    label.className = 'builtin';
+    label.dataset.lang = b.lang;
+    label.dataset.voice = b.id;
+
+    var box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = b.id;
+    box.disabled = already;
+    box.dataset.role = 'builtin';
+    label.appendChild(box);
+
+    var name = document.createElement('span');
+    name.textContent = b.name;
+    label.appendChild(name);
+
+    // 已添加的那几个带一个勾而不是灰掉：灰掉只是"不能选"，看不出"已经有了"。
+    if (already) {
+      var tick = document.createElement('span');
+      tick.className = 'tick';
+      tick.textContent = '已添加';
+      label.appendChild(tick);
+    }
+
+    box.onchange = function () { paintAddBuiltinButton(); };
+    builtinsBox.appendChild(label);
+  });
+}
+
+function pickedBuiltins() {
+  return Array.prototype.slice
+    .call(builtinsBox.querySelectorAll('input[data-role="builtin"]'))
+    .filter(function (box) { return box.checked; })
+    .map(function (box) { return box.value; });
+}
+
+function paintAddBuiltinButton() {
+  var n = pickedBuiltins().length;
+  btnAddBuiltin.disabled = n === 0;
+  btnAddBuiltin.textContent = n === 0 ? '添加选中的' : '添加选中的（' + n + '）';
+}
+
+btnAddBuiltin.onclick = function () {
+  var picked = pickedBuiltins();
+  if (picked.length === 0) { builtinNote.textContent = '先勾选想添加的音色。'; builtinNote.hidden = false; return; }
+  picked.forEach(function (id, i) {
+    var b = null;
+    for (var k = 0; k < BUILTIN_VOICES.length; k++) if (BUILTIN_VOICES[k].id === id) b = BUILTIN_VOICES[k];
+    voices.push({
+      id: 'p_builtin' + (voices.length + 1),
+      voiceId: id,
+      name: b.name,
+      model: 'mimo-v2.5-tts',
+      builtin: id,
+      base: 210 + i * 24,
+      source: 'preset',
+      status: 'ready',
+    });
+  });
+  voiceId = voices[voices.length - 1].id;
+  builtinNote.textContent = '已添加 ' + picked.length + ' 个内置音色。';
+  builtinNote.hidden = false;
+  paintBuiltins();
+  paintAddBuiltinButton();
+  paintVoices();
+  paintNow();
+  fillVoiceSelects();
+};
+
+/* ── 克隆（模拟：上传 → 创建 → 就绪 → 入列） ─────────────────
+   两条链路由**所选模型**决定，这是 v4.0 最重要的一处分叉：
+   - 百炼：云端复刻，要轮询到部署就绪（status: pending → ready）；
+   - MiMo：没有云端部署这一步，参考音频落在本机，档案当场可用 —— 所以不该去轮询
+     一个不存在的部署，那只会让用户对着"部署中"一直等。
+   ─────────────────────────────────────────────────────────── */
 var cloneBar = document.getElementById('clone-bar');
 var cloneState = document.getElementById('clone-state');
 var cloneText = document.getElementById('clone-text');
 var fileInput = document.getElementById('file');
+var cloneModel = document.getElementById('clone-model');
 
 async function runClone(label) {
+  var m = modelOf(cloneModel.value);
+  var local = m.provider === 'mimo';
+
   cloneBar.hidden = false;
   cloneState.hidden = false;
   var fill = cloneBar.firstElementChild;
@@ -1081,31 +1533,42 @@ async function runClone(label) {
   await sleep(420);
   fill.style.width = '25%';
 
-  cloneText.textContent = '已上传，创建音色…';
-  await sleep(520);
-  fill.style.width = '55%';
+  if (local) {
+    // MiMo：音频落本地，之后每次合成都附带上传，可以反复复用。
+    cloneText.textContent = '已存到本机…';
+    await sleep(620);
+    fill.style.width = '100%';
+  } else {
+    cloneText.textContent = '已上传，创建音色…';
+    await sleep(520);
+    fill.style.width = '55%';
+    cloneText.textContent = '部署中（DEPLOYING）…';
+    await sleep(700);
+    fill.style.width = '80%';
+    cloneText.textContent = '轮询就绪…';
+    await sleep(560);
+    fill.style.width = '100%';
+  }
 
-  cloneText.textContent = '部署中（DEPLOYING）…';
-  await sleep(700);
-  fill.style.width = '80%';
-
-  cloneText.textContent = '轮询就绪…';
-  await sleep(560);
-  fill.style.width = '100%';
-
-  var id = 'my-voice-' + (voices.length + 1);
-  voices.push({
-    id: id,
-    name: label + '（我的音色）',
-    model: 'cosyvoice-v3.5-plus',
+  var entry = {
+    id: 'p_myvoice' + (voices.length + 1),
+    voiceId: local ? '' : 'cosyvoice-v3.5-plus-dsh-' + (voices.length + 1),
+    name: label + (local ? '（MiMo 本地复刻）' : '（百炼复刻）'),
+    model: m.id,
+    sample: local ? 'p_myvoice' + (voices.length + 1) + '.wav' : '',
     base: 196,
-    kind: '克隆',
-  });
-  voiceId = id;
+    source: 'clone',
+    status: 'ready',
+  };
+  voices.push(entry);
+  voiceId = entry.id;
   paintVoices();
+  paintNow();
   // 新音色要出现在两个绑定下拉里，否则刚克隆好却绑不上。
   fillVoiceSelects();
-  cloneText.textContent = '就绪：' + id;
+  cloneText.textContent = local
+    ? '就绪：音频已存在本机，每次合成都会复用'
+    : '就绪：' + entry.voiceId;
 }
 
 document.getElementById('btn-clone').onclick = function () { fileInput.click(); };
@@ -1126,11 +1589,21 @@ document.getElementById('btn-preview').onclick = function () {
 };
 
 /* ── 起手 ───────────────────────────────────────────────────── */
-paintMode(true);
-paintRoleplay();
-fillVoiceSelects();
-paintVoices();
-render();
+(function boot() {
+  // 模型下拉在真插件里是 GET /models 回来之后才填的；这里离线，所以直接填。
+  fillModelSelect(addModel);
+  fillModelSelect(cloneModel, 'clone');
+  addModel.value = 'cosyvoice-v3.5-plus';
+  paintAddVoiceField();
+  paintBuiltins();
+  paintAddBuiltinButton();
+  paintMode(true);
+  paintRoleplay();
+  paintVoices();
+  paintNow();
+  fillVoiceSelects();
+  render();
+})();
 </script>
 </body>
 </html>

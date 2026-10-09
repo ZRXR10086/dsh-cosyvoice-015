@@ -27,6 +27,7 @@ import {
 } from '../host/dialogue.js'
 import { SpeechClient } from '../host/speech.js'
 import { AudioStore, cacheKeyOfParts } from '../host/store.js'
+import { VoiceProfiles } from '../host/profiles.js'
 import { VoiceSynthesizer } from '../host/synth.js'
 
 /** 一次非流式合成响应的形状：内层带 base64 音频。 */
@@ -184,13 +185,17 @@ describe('角色扮演的段与音色分配', () => {
   let store
   let synth
   let calls
+  let profilesPath
+  let profiles
   const settings = {
     apiKey: 'sk-test',
     voiceId: 'voice-base',
     model: 'cosyvoice-v3.5-plus',
     roleplay: true,
-    narrationVoiceId: 'voice-narration',
-    characterVoiceId: 'voice-character',
+    // 绑定的是**音色档案 id**，不再是音色 ID：音色 ID 单独一个字段不足以确定一套音色
+    // （模型不同则请求不同，MiMo 复刻音色压根没有 ID），档案才是完整的一单位。
+    narrationProfileId: 'p_narration',
+    characterProfileId: 'p_character',
   }
 
   beforeEach(() => {
@@ -198,6 +203,10 @@ describe('角色扮演的段与音色分配', () => {
     settings.outputDir = dir
     calls = []
     store = new AudioStore(() => dir)
+    profilesPath = join(dir, 'profiles.json')
+    profiles = new VoiceProfiles(() => profilesPath)
+    profiles.put({ id: 'p_narration', name: '旁白', voiceId: 'voice-narration', model: 'cosyvoice-v3.5-plus' })
+    profiles.put({ id: 'p_character', name: '角色', voiceId: 'voice-character', model: 'cosyvoice-v3.5-plus' })
     synth = new VoiceSynthesizer({
       speech: new SpeechClient({
         getSettings: () => settings,
@@ -209,6 +218,7 @@ describe('角色扮演的段与音色分配', () => {
       }),
       store,
       getSettings: () => settings,
+      profiles,
     })
   })
 
@@ -222,19 +232,39 @@ describe('角色扮演的段与音色分配', () => {
     ])
   })
 
+  it('每段连模型一起带出去（音色即模型）', () => {
+    // 这是本次的核心不变量：绑定音色档案之后，模型不必再单独问一遍，
+    // 它是档案的一部分 —— 否则"选了这个音色却用那个模型合成"就会发生。
+    profiles.put({ id: 'p_character', model: 'cosyvoice-v3.5-flash' })
+    const plan = synth.plan(SCRIPT, { roleplay: true })
+    assert.deepEqual(plan.parts.map(part => part.model), [
+      'cosyvoice-v3.5-plus', 'cosyvoice-v3.5-flash', 'cosyvoice-v3.5-plus',
+    ])
+  })
+
   it('请求里的音色覆盖配置', () => {
+    profiles.put({ id: 'p_req_narration', name: '临时旁白', voiceId: 'req-narration', model: 'cosyvoice-v3.5-plus' })
+    profiles.put({ id: 'p_req_character', name: '临时角色', voiceId: 'req-character', model: 'cosyvoice-v3.5-plus' })
     const plan = synth.plan(SCRIPT, {
       roleplay: true,
-      narrationVoiceId: 'req-narration',
-      characterVoiceId: 'req-character',
+      narrationProfileId: 'p_req_narration',
+      characterProfileId: 'p_req_character',
     })
     assert.deepEqual(plan.parts.map(part => part.voiceId), [
       'req-narration', 'req-character', 'req-narration',
     ])
   })
 
+  it('绑定的档案已被删除时回落到当前音色，而不是报错', () => {
+    profiles.remove('p_character')
+    const plan = synth.plan(SCRIPT, { roleplay: true, characterProfileId: 'p_character' })
+    // 回落到**当前激活的档案**（本组用例里第一套档案自动成为当前音色），
+    // 而不是报错 —— 绑定是在设置页里选的，而档案随时可能被删掉。
+    assert.equal(plan.parts[1].voiceId, 'voice-narration')
+  })
+
   it('没绑定音色时跟随当前音色', () => {
-    const bare = { ...settings, narrationVoiceId: '', characterVoiceId: '' }
+    const bare = { ...settings, narrationProfileId: '', characterProfileId: '' }
     const local = new VoiceSynthesizer({
       speech: new SpeechClient({ getSettings: () => bare, fetchImpl: async () => okResponse(pcmOf('narration')) }),
       store,
@@ -256,7 +286,9 @@ describe('角色扮演的段与音色分配', () => {
   it('关闭角色扮演时整段用当前音色', () => {
     const plan = synth.plan(SCRIPT, { roleplay: false })
     assert.equal(plan.multi, false)
-    assert.equal(plan.parts[0].voiceId, 'voice-base')
+    // 当前音色 = 激活的档案（本组用例里第一套自动成为激活项），它连模型一起带出来。
+    assert.equal(plan.parts[0].voiceId, 'voice-narration')
+    assert.equal(plan.parts[0].model, 'cosyvoice-v3.5-plus')
     assert.equal(plan.parts[0].text, SCRIPT)
   })
 
@@ -292,7 +324,8 @@ describe('角色扮演的段与音色分配', () => {
 
   it('换了角色音色不会命中旧缓存', async () => {
     await synth.synthesize(SCRIPT, { roleplay: true })
-    const second = await synth.synthesize(SCRIPT, { roleplay: true, characterVoiceId: 'another' })
+    profiles.put({ id: 'p_another', name: '另一个角色', voiceId: 'another', model: 'cosyvoice-v3.5-plus' })
+    const second = await synth.synthesize(SCRIPT, { roleplay: true, characterProfileId: 'p_another' })
     assert.equal(second.cached, false)
     assert.equal(calls.length, 6)
   })
@@ -303,12 +336,14 @@ describe('角色扮演的流式合成', () => {
   let store
   let synth
   let calls
+  let profilesPath
+  let profiles
   const settings = {
     apiKey: 'sk-test',
     voiceId: 'voice-base',
     model: 'cosyvoice-v3.5-plus',
-    narrationVoiceId: 'voice-narration',
-    characterVoiceId: 'voice-character',
+    narrationProfileId: 'p_narration',
+    characterProfileId: 'p_character',
   }
 
   beforeEach(() => {
@@ -316,6 +351,10 @@ describe('角色扮演的流式合成', () => {
     settings.outputDir = dir
     calls = []
     store = new AudioStore(() => dir)
+    profilesPath = join(dir, 'profiles.json')
+    profiles = new VoiceProfiles(() => profilesPath)
+    profiles.put({ id: 'p_narration', name: '旁白', voiceId: 'voice-narration', model: 'cosyvoice-v3.5-plus' })
+    profiles.put({ id: 'p_character', name: '角色', voiceId: 'voice-character', model: 'cosyvoice-v3.5-plus' })
     synth = new VoiceSynthesizer({
       speech: new SpeechClient({
         getSettings: () => settings,
@@ -335,6 +374,7 @@ describe('角色扮演的流式合成', () => {
       }),
       store,
       getSettings: () => settings,
+      profiles,
     })
   })
 
@@ -391,6 +431,7 @@ describe('角色扮演的流式合成', () => {
       }),
       store,
       getSettings: () => settings,
+      profiles,
     })
     await assert.rejects(async () => {
       for await (const frame of failing.stream(SCRIPT, { roleplay: true })) { void frame }

@@ -18,10 +18,16 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './harness.js'
 
 /** 档案文件格式版本。将来结构变了可以据此迁移。 */
-export const PROFILES_VERSION = 1
+export const PROFILES_VERSION = 2
 
-/** `source` 的合法取值。 */
-export const PROFILE_SOURCES = ['clone', 'manual', 'cloud']
+/**
+ * `source` 的合法取值。
+ *
+ * `preset` 是 v4 新增的：MiMo 的预置音色不是复刻来的，也不是用户手填的 ID，
+ * 而是从内置音色列表里挑的一个名字。给它单独一个来源，界面上就能把它显示成
+ * "内置音色"而不是一条看不出所以然的字符串。
+ */
+export const PROFILE_SOURCES = ['clone', 'manual', 'cloud', 'preset', 'design']
 
 /** `status` 的合法取值。 */
 export const PROFILE_STATUSES = ['ready', 'pending', 'failed']
@@ -52,6 +58,17 @@ export function newProfileId() {
 
 /**
  * 把任意读到的对象收敛成一个合法档案条目。
+ *
+ * 新增的两个字段是 v4 的关键，它们让"一套音色 = 模型 + 音色"这件事在档案层就完整：
+ *
+ * - `sample`：MiMo 复刻音色**唯一的凭据** —— 本地样本文件名。MiMo 的复刻没有音色 ID
+ *   可持有（参考音频随每次请求附上），所以它必须在档案里；否则这套音色下次合成就没法
+ *   复现，而界面上还看不出任何异常。
+ * - `designPrompt`：MiMo 音色设计的描述。与 `voiceId` 分开存，是因为它的长度与语义
+ *   都远超"一个 ID"，而 `voiceId` 那个字段名会让人在代码里读错它的用途。
+ *
+ * 老档案（v1）读出来时这两个字段为空，与"没有这两个字段"不可区分 —— 这正是我们要的：
+ * 对百炼音色它们本来就无意义。
  * @param raw - 读到的原始条目。
  * @returns 规范化的档案。
  */
@@ -63,6 +80,10 @@ function normalize(raw) {
     name: String(raw.name ?? '').trim(),
     voiceId: String(raw.voiceId ?? '').trim(),
     model: String(raw.model ?? '').trim(),
+    // 这两个键**总是**出现（哪怕是空串），这样调用方不必写 `?? ''`，
+    // 而 JSON 里少一个键会让"部分更新"与"清空"分不清。
+    sample: String(raw.sample ?? '').trim(),
+    designPrompt: String(raw.designPrompt ?? '').trim(),
     source,
     status,
   }

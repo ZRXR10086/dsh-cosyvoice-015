@@ -243,6 +243,64 @@ export function interpretSseFrame(frame) {
 }
 
 /**
+ * 一个 OpenAI 形状的 SSE 帧说了什么。
+ *
+ * MiMo 走的是 OpenAI 兼容的 `/chat/completions`，所以它的流式帧与百炼那套**完全不同**：
+ * 没有 `event:` 行，每一帧都是 `data: {...}`，音频在 `choices[0].delta.audio.data`
+ * （base64 的 `pcm16`），结束是 `data: [DONE]`。
+ *
+ * 与 {@link interpretSseFrame} 并列存在而不是合并成一份，是因为两者的帧结构没有交集：
+ * 百炼把事件名放在 `event:` 行或 `header.event` 里并按名字分类，OpenAI 这一族根本
+ * 没有事件名、只有一个音频字段。硬合并出来的产物会是一堆 `?? []` 的兜底分支，
+ * 每一处都要猜"这帧是哪一族的"——而猜错的后果是整条流静默失效。
+ *
+ * `[DONE]` 哨兵值得单列：它是**非 JSON**，直接 `JSON.parse` 会抛，于是这里按文本
+ * 先认掉它，而不是让一个正常的结束标记把整次流变成失败。
+ * @param frame - `{ event, data }`。
+ * @returns `{ kind: 'audio' | 'finish' | 'failed' | 'ignored' }`。
+ */
+export function interpretOpenAiChunk(frame) {
+  const data = String(frame?.data ?? '').trim()
+  if (data === '' ) return { kind: 'ignored' }
+  if (data === '[DONE]') return { kind: 'finish', url: undefined, characters: 0 }
+
+  let parsed
+  try {
+    parsed = JSON.parse(data)
+  } catch {
+    // 非 JSON 的 data（例如某些实现先发一个心跳注释）一律忽略，而不是让整次流式失败。
+    return { kind: 'ignored' }
+  }
+  if (parsed === null || typeof parsed !== 'object') return { kind: 'ignored' }
+
+  // 错误可以在帧的顶层（`{ error: {...} }`），也可以挂在 choice 上（`finish_reason`）。
+  const error = parsed?.error
+  if (error !== null && typeof error === 'object') {
+    return { kind: 'failed', message: String(error.message ?? 'MiMo 流式合成失败') }
+  }
+
+  const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : undefined
+  const delta = choice?.delta
+  const audio = delta?.audio
+  // 预置音色/设计音色这两款在"兼容模式"下会把整段结果塞进**第一个也是唯一**一个
+  // 帧里，于是上层那条"每帧到达就 yield"的路径照样成立，只是这帧很大。
+  const base64 = typeof audio?.data === 'string' ? audio.data : typeof audio === 'string' ? audio : ''
+  if (base64 !== '') return { kind: 'audio', base64 }
+
+  const finishReason = String(choice?.finish_reason ?? '')
+  if (finishReason !== '') {
+    const detail = typeof choice?.delta?.content === 'string' ? choice.delta.content : ''
+    if (detail !== '') return { kind: 'failed', message: detail }
+    return {
+      kind: 'finish',
+      url: undefined,
+      characters: Number(parsed?.usage?.characters ?? parsed?.usage?.completion_tokens ?? 0),
+    }
+  }
+  return { kind: 'ignored' }
+}
+
+/**
  * 给裸 PCM 补一个 WAV 头。
  *
  * 不重编码，所以这段操作是 O(1) 的一次拷贝 —— 顺手做的事不该成为流式链路上的

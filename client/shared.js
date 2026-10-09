@@ -137,11 +137,11 @@ function saveMode(value) {
 /** 角色扮演开关的存储键。 */
 var ROLEPLAY_KEY = 'dsh-cosyvoice.roleplay'
 
-/** 旁白音色的存储键。 */
-var NARRATION_KEY = 'dsh-cosyvoice.narrationVoice'
+/** 旁白音色档案的存储键。 */
+var NARRATION_KEY = 'dsh-cosyvoice.narrationProfile'
 
-/** 角色音色的存储键。 */
-var CHARACTER_KEY = 'dsh-cosyvoice.characterVoice'
+/** 角色音色档案的存储键。 */
+var CHARACTER_KEY = 'dsh-cosyvoice.characterProfile'
 
 /** localStorage 不可用时的兜底：键 → 值。 */
 var prefMemory = {}
@@ -195,23 +195,30 @@ function saveRoleplay(on) {
   savePref(ROLEPLAY_KEY, on ? 'true' : 'false')
 }
 
-/** @returns 绑定的旁白音色 ID；没存过是 null，存过"跟随"是空串。 */
-function readNarrationVoice() {
+/**
+ * @returns 绑定的旁白**档案 id**；没存过是 null，存过"跟随"是空串。
+ *
+ * 存的是档案 id 而不是音色 ID，因为**模型跟着音色走**（见 `settings-page.js`）：音色
+ * ID 本身不带模型，同一个音色 ID 在不同模型下未必是同一个嗓子，而档案才是"音色 +
+ * 模型"那个不可分割的整体。存 id 也顺带解决了一个真实存在的错——绑定的音色被删掉
+ * 之后，服务端能按 id 认出"这套没了"并回落，而不是拿着一个还在的音色 ID 悄悄继续。
+ */
+function readNarrationProfile() {
   return readPref(NARRATION_KEY)
 }
 
-/** @param id - 旁白音色 ID。 */
-function saveNarrationVoice(id) {
+/** @param id - 旁白档案 id。 */
+function saveNarrationProfile(id) {
   savePref(NARRATION_KEY, String(id === undefined || id === null ? '' : id))
 }
 
-/** @returns 绑定的角色音色 ID；没存过是 null，存过"跟随"是空串。 */
-function readCharacterVoice() {
+/** @returns 绑定的角色**档案 id**；没存过是 null，存过"跟随"是空串。 */
+function readCharacterProfile() {
   return readPref(CHARACTER_KEY)
 }
 
-/** @param id - 角色音色 ID。 */
-function saveCharacterVoice(id) {
+/** @param id - 角色档案 id。 */
+function saveCharacterProfile(id) {
   savePref(CHARACTER_KEY, String(id === undefined || id === null ? '' : id))
 }
 
@@ -629,10 +636,10 @@ async function speakAs(action, body, messageId) {
   if (roleplay === 'true') payload.roleplay = true
   else if (roleplay === 'false') payload.roleplay = false
   // 空串是有意义的（"跟随当前音色"），但那该由配置去表达，不必占用请求体。
-  var narrationVoice = readNarrationVoice()
-  if (narrationVoice !== null && narrationVoice !== '') payload.narrationVoiceId = narrationVoice
-  var characterVoice = readCharacterVoice()
-  if (characterVoice !== null && characterVoice !== '') payload.characterVoiceId = characterVoice
+  var narrationProfile = readNarrationProfile()
+  if (narrationProfile !== null && narrationProfile !== '') payload.narrationProfileId = narrationProfile
+  var characterProfile = readCharacterProfile()
+  if (characterProfile !== null && characterProfile !== '') payload.characterProfileId = characterProfile
 
   var response
   try {

@@ -13,6 +13,7 @@
  */
 
 import { dialogueParts, hasDialogue, KIND_DIALOGUE, KIND_NARRATION, summarizeParts } from './dialogue.js'
+import { isMimo, kindOf, KIND_CLONE, normalizeModel } from './models.js'
 import { MAX_TEXT_CHARS, normalizeText, PCM_SAMPLE_RATE } from './speech.js'
 import { cacheKeyOf, cacheKeyOfParts, EXT_ONE_SHOT, EXT_WAV } from './store.js'
 import { wavFromPcm } from './stream.js'
@@ -62,21 +63,53 @@ async function mapInOrder(items, limit, task) {
   return out
 }
 
+/**
+ * 把一套音色档案翻译成一次合成请求的身份（模型 + 音色 + 本地样本）。
+ *
+ * **这是"音色即模型"的落地点。** 档案是用户唯一需要维护的东西，所以"用哪个模型"
+ * 必须从档案里读出来，而不是再问一次设置页 —— 后者正是本次要取消的那个全局选项。
+ *
+ * 字段名是 `voiceKind` 而不是 `kind`，因为段序列里已经有一个 `kind` 了，而且它指的
+ * 是**旁白还是台词**（见 `./dialogue.js`）。两个含义不同的字段同名，于是 `plan()` 里
+ * 一次展开就会互相覆盖：段落类型被音色来源顶掉，`hasDialogue` 于是永远说"没有台词"，
+ * 角色扮演静默退化成整段旁白 —— 而且不报任何错。
+ * @param profile - 音色档案。
+ * @param samples - 本地样本仓库；省略时 MiMo 复刻音色会被判为不可用。
+ * @returns `{ model, voiceId, sample, voiceKind, profileId, profileName }`。
+ */
+function identityOf(profile, samples) {
+  const model = normalizeModel(profile.model)
+  const voiceKind = kindOf(model)
+  return {
+    model,
+    // 复刻音色（MiMo）的 voiceId 是空的：它的音色就是那段音频本身。
+    voiceId: voiceKind === KIND_CLONE && isMimo(model) ? '' : profile.voiceId,
+    sample: voiceKind === KIND_CLONE && isMimo(model) ? profile.sample : '',
+    voiceKind,
+    profileId: profile.id,
+    profileName: profile.name,
+    // 样本内容指纹进缓存键：用户换了参考音频（文件名不变）时必然重新合成。
+    sampleFingerprint: samples === undefined ? '' : samples.fingerprint(profile.sample),
+  }
+}
+
 /** 带内容哈希缓存的语音合成器。 */
 export class VoiceSynthesizer {
   /**
    * @param options - 协作者。
-   * @param options.speech - 云端合成客户端。
+   * @param options.speech - 合成引擎（按模型分发给对应的那一家）。
    * @param options.store - 音频目录与缓存。
    * @param options.getSettings - 每次调用都读当前设置。
    * @param options.profiles - 音色档案；省略时固定走设置里的回退值。
+   * @param options.samples - 本地音色样本仓库；省略时 MiMo 复刻音色不可用。
    * @param options.log - 诊断输出（不进响应）。
    */
-  constructor({ speech, store, getSettings, profiles, log }) {
+  constructor({ speech, store, getSettings, profiles, samples, log }) {
     this.speech = speech
     this.store = store
     this.getSettings = getSettings
     this.profiles = profiles
+    this.samples = samples
     this.log = log ?? (() => {})
   }
 
@@ -87,24 +120,22 @@ export class VoiceSynthesizer {
    * `voiceId` / `model` 在 v2 已经降级成"一套档案都没有"时的回退值，这样
    * v1 用户升级上来不需要重新配置就能继续用。
    *
-   * 档案存在但音色 ID 还是空的（克隆中）时不作数，否则每次合成都会拿一个空
-   * 音色去打云端，报错还难懂。
+   * 档案存在但音色还不可用（克隆中、复刻音色丢了样本）时不作数，否则每次合成都会拿
+   * 一个空音色去打云端，报错还难懂。**"不可用"的判定随模型而变** —— 百炼复刻音色看
+   * `voiceId`，MiMo 复刻音色看本地样本文件在不在（见 `./models.js`）。
    * @returns 模型、音色，以及命中档案时的档案 id / 名称。
    */
   identity() {
     const settings = this.getSettings() ?? {}
     const fallback = {
-      model: String(settings.model ?? '').trim(),
+      model: normalizeModel(settings.model),
       voiceId: String(settings.voiceId ?? '').trim(),
+      sample: '',
+      voiceKind: kindOf(settings.model),
     }
     const profile = this.profiles === undefined ? undefined : this.profiles.active()
-    if (profile === undefined || profile.voiceId === '') return fallback
-    return {
-      model: profile.model === '' ? fallback.model : profile.model,
-      voiceId: profile.voiceId,
-      profileId: profile.id,
-      profileName: profile.name,
-    }
+    if (profile === undefined || !isUsableProfile(profile, this.samples)) return fallback
+    return identityOf(profile, this.samples)
   }
 
   /**
@@ -113,31 +144,37 @@ export class VoiceSynthesizer {
    * 音色的取值顺序是**请求 > 配置 > 当前音色**：请求里带的是"用户刚刚选的"，
    * 配置里是持久化的那一份，两者都没有时才跟随当前激活的档案。于是没绑定角色
    * 音色也能直接用（听起来就是现在的声音），绑定了才分。
+   *
+   * 绑定用的是**档案 id** 而不是音色 ID：音色 ID 单独一个字段不足以确定一套音色
+   * （模型不同则请求不同，MiMo 复刻音色压根没有 ID），而档案是"名称 + 模型 + 音色"
+   * 的完整单位。所以这里按 id 去找档案，再由档案推出身份。
    * @param text - 已清洗的文本。
    * @param options - 本次的偏好。
    * @param options.roleplay - 是否按角色扮演处理。
-   * @param options.narrationVoiceId - 旁白音色（覆盖配置）。
-   * @param options.characterVoiceId - 台词音色（覆盖配置）。
+   * @param options.narrationProfileId - 旁白音色档案 id（覆盖配置）。
+   * @param options.characterProfileId - 台词音色档案 id（覆盖配置）。
    * @returns `{ parts, multi }`；`multi` 为真表示要走多段合成。
    */
   plan(text, options = {}) {
     const base = this.identity()
     const settings = this.getSettings() ?? {}
-    const narrationVoice = firstNonEmpty(options.narrationVoiceId, settings.narrationVoiceId, base.voiceId)
-    const characterVoice = firstNonEmpty(options.characterVoiceId, settings.characterVoiceId, base.voiceId)
+    const narration = this.resolve(options.narrationProfileId, settings.narrationProfileId, base)
+    const character = this.resolve(options.characterProfileId, settings.characterProfileId, base)
 
     if (options.roleplay !== true) {
       return {
         multi: false,
-        parts: [{ kind: KIND_NARRATION, text, model: base.model, voiceId: base.voiceId }],
+        parts: [{ ...base, kind: KIND_NARRATION, text }],
       }
     }
 
     const parts = dialogueParts(text).map(part => ({
+      // `kind` 在**最后**写：它是段落的类型（旁白 / 台词），而展开进来的音色身份里
+      // 有 `voiceKind`（预置 / 复刻 / 设计）。顺序反了的话段落类型会被顶掉，
+      // `hasDialogue` 于是永远说"没有台词"，角色扮演静默退化成整段旁白。
+      ...(part.kind === KIND_DIALOGUE ? character : narration),
       kind: part.kind,
       text: part.text,
-      model: base.model,
-      voiceId: part.kind === KIND_DIALOGUE ? characterVoice : narrationVoice,
     }))
 
     // 一条台词都没有：整段都是旁白，那就用旁白音色一次念完 —— 不需要分段，
@@ -145,10 +182,29 @@ export class VoiceSynthesizer {
     if (!hasDialogue(parts)) {
       return {
         multi: false,
-        parts: [{ kind: KIND_NARRATION, text, model: base.model, voiceId: narrationVoice }],
+        parts: [{ ...narration, kind: KIND_NARRATION, text }],
       }
     }
     return { multi: true, parts }
+  }
+
+  /**
+   * 挑一套音色：显式指定的那一套，没有就跟随当前音色。
+   *
+   * 找不到（或那一套不可用）时**静默回落到当前音色**而不是报错：绑定是在设置页里
+   * 选的，而档案随时可能被删掉；为一个已经失效的绑定让整次朗读失败，比"听起来是
+   * 当前音色"糟糕得多。
+   * @param explicit - 请求里的档案 id。
+   * @param configured - 配置里的档案 id。
+   * @param base - 当前生效的音色（回落目标）。
+   * @returns 一次合成请求的身份。
+   */
+  resolve(explicit, configured, base) {
+    const wanted = firstNonEmpty(explicit, configured)
+    if (wanted === '' || this.profiles === undefined) return base
+    const found = this.profiles.list().find(item => item.id === wanted)
+    if (found === undefined || !isUsableProfile(found, this.samples)) return base
+    return identityOf(found, this.samples)
   }
 
   /**
@@ -174,7 +230,7 @@ export class VoiceSynthesizer {
    * @throws {Error} 配置缺失或合成失败时抛出。
    */
   async synthesizeOne(part) {
-    const key = cacheKeyOf(part.model, part.voiceId, part.text)
+    const key = cacheKeyOf(part.model, part)
     const cached = this.store.hit(key, EXT_ONE_SHOT)
     if (cached !== undefined) {
       this.log(`synth: 命中缓存 ${cached.name}（${String(cached.bytes)} 字节）`)
@@ -184,7 +240,7 @@ export class VoiceSynthesizer {
     // 长文本在清洗后才截断，所以缓存键算的是"真正会发出去的内容"——
     // 否则同一段超长文本在截断前后会算出两个键，白付一次钱。
     const clipped = part.text.length > MAX_TEXT_CHARS ? part.text.slice(0, MAX_TEXT_CHARS) : part.text
-    const result = await this.speech.synthesize(clipped, { model: part.model, voiceId: part.voiceId })
+    const result = await this.speech.synthesize(clipped, part)
     const clip = this.store.put(key, result.bytes, EXT_ONE_SHOT)
     this.log(`synth: 已合成 ${clip.name}（${String(clip.bytes)} 字节，计费 ${String(result.characters)} 字符）`)
     return { ...clip, cached: false, text: clipped, characters: result.characters }
@@ -212,7 +268,7 @@ export class VoiceSynthesizer {
     this.log(`synth: 角色扮演 ${String(summary.narration)} 段旁白 / ${String(summary.dialogue)} 段台词`)
 
     const results = await mapInOrder(parts, MAX_CONCURRENCY, part =>
-      this.speech.synthesize(part.text, { model: part.model, voiceId: part.voiceId }, 'pcm'))
+      this.speech.synthesize(part.text, part, 'pcm'))
 
     const whole = Buffer.concat(results.map(result => result.bytes))
     if (whole.length === 0) throw new Error('合成返回的音频为空，请稍后重试。')
@@ -244,7 +300,7 @@ export class VoiceSynthesizer {
     const plan = this.plan(text, options)
     if (!plan.multi) {
       const part = plan.parts[0]
-      const key = cacheKeyOf(part.model, part.voiceId, part.text)
+      const key = cacheKeyOf(part.model, part)
 
       const cached = this.store.hit(key, EXT_WAV)
       if (cached !== undefined) {
@@ -259,14 +315,18 @@ export class VoiceSynthesizer {
       let characters = 0
       let rate = PCM_SAMPLE_RATE
 
-      for await (const frame of this.speech.stream(clipped, { model: part.model, voiceId: part.voiceId })) {
+      for await (const frame of this.speech.stream(clipped, part)) {
         if (frame.kind === 'audio') {
           chunks.push(frame.bytes)
           rate = frame.sampleRate
           yield { kind: 'audio', bytes: frame.bytes, sampleRate: frame.sampleRate }
           continue
         }
-        if (frame.kind === 'finish') characters = frame.characters
+        // 这里是**取最大**而不是"最后一个赢"：MiMo 的流会先给一帧带
+        // `finish_reason` 与真实用量的帧，再给一个只表示"流结束了"的 `[DONE]`
+        // 哨兵（它不带用量）。直接赋值会让那个 0 把真实字符数抹掉，于是日志里的
+        // 计费字符数永远是 0 —— 而这一行是用户核对用量时唯一能对照的东西。
+        if (frame.kind === 'finish') characters = Math.max(characters, Number(frame.characters ?? 0))
       }
 
       const whole = Buffer.concat(chunks)
@@ -311,7 +371,7 @@ export class VoiceSynthesizer {
 
     try {
       // 这一段会同步校验 Key / 音色：不合法就在这里炸掉，一个请求都不会发出去。
-      opened = parts.map(part => this.speech.openStream(part.text, { model: part.model, voiceId: part.voiceId }))
+      opened = parts.map(part => this.speech.openStream(part.text, part))
 
       for (let index = 0; index < opened.length; index += 1) {
         for await (const frame of opened[index].frames) {
@@ -340,6 +400,43 @@ export class VoiceSynthesizer {
     this.log(`synth: 角色扮演流式合成 ${clip.name}（${String(clip.bytes)} 字节，计费 ${String(characters)} 字符）`)
     yield { kind: 'ready', clip: { ...clip, cached: false, characters } }
   }
+}
+
+/**
+ * 一套音色档案此刻能不能用来合成。
+ *
+ * 判定**随模型而变**，这是引入 MiMo 之后最要紧的一处分支：
+ *
+ * - 百炼复刻音色：看 `voiceId`（部署中的克隆音色还没有）；
+ * - MiMo 复刻音色：`voiceId` 天生为空，要看**本地样本文件在不在** —— 它是这套音色
+ *   唯一的凭据（见 `./samples.js`）；
+ * - 音色设计：看描述文本非空。
+ *
+ * 统一写成"档案里该有的那一样东西在不在"，而不是三处各写一遍 if：那三处一旦漏改，
+ * 表现都是"合成失败"而原因完全不同（空音色 / 样本丢失 / 描述为空），用户和排查者
+ * 都要重新学一遍。
+ * @param profile - 音色档案。
+ * @param samples - 本地样本仓库；省略时 MiMo 复刻音色一律判为不可用。
+ * @returns 是否可用。
+ */
+function isUsableProfile(profile, samples) {
+  if (profile.status !== undefined && profile.status !== 'ready') return false
+  const model = normalizeModel(profile.model)
+  const kind = kindOf(model)
+  if (kind === KIND_CLONE && isMimo(model)) {
+    const sample = String(profile.sample ?? '').trim()
+    if (sample === '') return false
+    return samples === undefined ? false : samples.read(sample) !== undefined
+  }
+  // 描述和音色 ID 是**同一个东西的两种叫法**：界面写描述、导入的云端档案写 ID。
+  //
+  // 这里必须用 `||` 而不是 `??`：`normalize()` 保证 `designPrompt` 这个键**总是**
+  // 存在（空档案里也是空串），而 `??` 只在 null/undefined 时才看右边 —— 于是空串
+  // 不会被回退，一套描述明明存在（存在 `voiceId` 里）的设计档案被判成"没有描述"，
+  // 不可用之后**静默回落到当前音色**。症状是"选了 MiMo 音色设计，念出来却是百炼那个
+  // 声音"，且没有任何报错。
+  if (kind === 'design') return (String(profile.designPrompt).trim() || String(profile.voiceId ?? '').trim()) !== ''
+  return String(profile.voiceId ?? '').trim() !== ''
 }
 
 /**

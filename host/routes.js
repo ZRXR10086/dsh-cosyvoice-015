@@ -16,6 +16,8 @@
 
 import { createReadStream, existsSync } from 'node:fs'
 import { MAX_UPLOAD_BYTES, modelFromVoiceId } from './clone.js'
+import { catalogView, decorateName, isMimo, KIND_CLONE, KIND_DESIGN, kindOf, normalizeModel, supportsStreaming } from './models.js'
+import { ACCEPTED_EXTENSIONS, MAX_SAMPLE_BYTES } from './samples.js'
 import { MODE_ONE_SHOT, MODE_STREAM, normalizeFlag, normalizeMode } from './settings.js'
 import { STREAM_SAMPLE_RATE } from './stream.js'
 import { mimeOf } from './store.js'
@@ -179,13 +181,14 @@ function sendFrame(res, event, data) {
  * @param options.store - 音频目录。
  * @param options.texts - messageId → 文本 的解析器。
  * @param options.profiles - 音色档案。
- * @param options.cloner - 音色复刻客户端。
+ * @param options.cloner - 音色复刻客户端（百炼那侧）。
+ * @param options.samples - 本地音色样本仓库（MiMo 复刻音色靠它复用）。
  * @param options.bootClip - 内置开机音的绝对路径；不存在时为 undefined。
  * @param options.openDir - 在系统文件管理器里打开音频目录。
  * @param options.log - 诊断输出（不进响应）。
  * @returns 顺序稳定的路由注册项。
  */
-export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cloner, bootClip, openDir, log }) {
+export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cloner, samples, bootClip, openDir, log }) {
   /**
    * 本次请求要用的合成方式。
    *
@@ -220,17 +223,19 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
   }
 
   /**
-   * 一次请求的语音偏好：开不开角色扮演、旁白与台词各自用哪个音色。
+   * 一次请求的语音偏好：开不开角色扮演、旁白与台词各自用哪套音色。
    *
-   * 两个音色 ID 允许为空，空表示"听配置的"——客户端没在本地存过就不必把配置
-   * 原样回传一遍。
+   * 两个绑定允许为空，空表示"听配置的"——客户端没在本地存过就不必把配置原样回传一遍。
+   *
+   * 带的是**音色档案 id** 而不是音色 ID：音色 ID 单独一个字段不足以确定一套音色
+   * （模型不同则请求不同，MiMo 复刻音色压根没有 ID），而档案是完整的一单位。
    * @param body - 请求体。
    * @returns 交给 {@link import('./synth.js').VoiceSynthesizer} 的偏好。
    */
   const prefsOf = (body) => ({
     roleplay: roleplayOf(body === undefined || body === null ? undefined : body.roleplay),
-    narrationVoiceId: String(body?.narrationVoiceId ?? '').trim(),
-    characterVoiceId: String(body?.characterVoiceId ?? '').trim(),
+    narrationProfileId: String(body?.narrationProfileId ?? '').trim(),
+    characterProfileId: String(body?.characterProfileId ?? '').trim(),
   })
 
   /**
@@ -312,12 +317,20 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
 
   /**
    * 档案清单 + 当前激活项，附一份"没有档案时会用到什么"的回退值。
+   *
+   * 每条档案额外带上 `kind`（音色来源）与 `lowLatencyStream`（该模型流式是否低延迟），
+   * 两个都是**服务端算出来的事实**，而不是让前端各自去猜——界面据此决定"新增音色"
+   * 的表单给什么输入框，以及要不要提示"这款模型的流式要等整段合成完"。
    * @returns 给设置页的档案视图。
    */
   const describeProfiles = () => {
     const data = profiles === undefined ? { profiles: [], activeId: '' } : profiles.load()
     return {
-      profiles: data.profiles,
+      profiles: data.profiles.map(profile => ({
+        ...profile,
+        kind: kindOf(profile.model),
+        lowLatencyStream: supportsStreaming(profile.model),
+      })),
       activeId: data.activeId,
       fallback: {
         model: String((getSettings() ?? {}).model ?? '').trim(),
@@ -342,23 +355,41 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
         const identity = synth.identity()
         sendJson(res, 200, {
           ok: true,
-          configured: String(settings.apiKey ?? '').trim() !== '' && identity.voiceId !== '',
-          hasKey: String(settings.apiKey ?? '').trim() !== '',
+          configured: String(settings.apiKey ?? '').trim() !== '' || String(settings.mimoApiKey ?? '').trim() !== '',
+          hasKey: String(settings.apiKey ?? '').trim() !== '' || String(settings.mimoApiKey ?? '').trim() !== '',
           model: identity.model,
           voiceId: identity.voiceId,
           profileId: identity.profileId ?? '',
+          // 这套音色用哪一家引擎、以及是不是低延迟流式 —— 界面据此说明"选了实时但这款
+          // 模型要等整段合成完"，而不是让用户自己撞上这个差别。
+          provider: isMimo(identity.model) ? 'mimo' : 'dashscope',
+          lowLatencyStream: supportsStreaming(identity.model),
           mode: modeOf(wanted),
           configuredMode: modeOf(),
           // 角色扮演的两个音色是"绑定"在设置页的，报出来是为了让页面显示
           // 真正会生效的那一套 —— 而不是让人以为绑了却没生效。
           roleplay: roleplayOf(wantedRoleplay),
           configuredRoleplay: roleplayOf(),
-          narrationVoiceId: String(settings.narrationVoiceId ?? '').trim(),
-          characterVoiceId: String(settings.characterVoiceId ?? '').trim(),
+          narrationProfileId: String(settings.narrationProfileId ?? '').trim(),
+          characterProfileId: String(settings.characterProfileId ?? '').trim(),
           bootSound: settings.bootSound === true,
           dir: store.dir(),
           count: store.count(),
         })
+      },
+    },
+    {
+      /**
+       * 模型目录 + MiMo 内置音色清单。
+       *
+       * 设置页的模型下拉与"添加内置音色"列表**都从这一份来**，于是"页面上能选到什么"
+       * 永远等于"服务端认得什么"。多写一份到前端只会带来一个迟早对不上的副本 ——
+       * 而对不上的后果是"用户选了一个这里没有的模型，合成时报 404"。
+       */
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/models`,
+      handler(req, res) {
+        sendJson(res, 200, { ok: true, ...catalogView() })
       },
     },
     {
@@ -376,26 +407,50 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
         if (body === undefined) return sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' })
 
         if (req.method === 'DELETE') {
+          // 删档案时顺带删掉它的本地参考音频：否则 `~/.dsh/voice/samples` 里会攒下一堆
+          // 再也不会被用到的音频，而且用户没有任何办法知道那些文件是什么。
+          const target = profiles.list().find(item => item.id === String(body.id ?? '').trim())
           if (!profiles.remove(String(body.id ?? '').trim())) {
             return sendJson(res, 404, { ok: false, message: '没有这套音色档案。' })
+          }
+          if (target !== undefined && samples !== undefined && target.sample !== '') {
+            samples.remove(target.sample)
           }
           return sendJson(res, 200, { ok: true, ...describeProfiles() })
         }
 
         // 给了 id 就是更新，没给就是新建。
         const id = String(body.id ?? '').trim()
+        const model = normalizeModel(body.model)
+        const kind = kindOf(model)
         const voiceId = String(body.voiceId ?? '').trim()
-        if (voiceId === '') return sendJson(res, 400, { ok: false, message: '音色 ID 不能为空。' })
-        const name = String(body.name ?? '').trim()
+        // MiMo 的音色设计没有"音色 ID"，它就是那段描述。两者分开存，但**校验时视为同一个
+        // 必填项** —— 否则一个空的音色设计能被存成档案，然后在合成时才报"还没有写描述"。
+        const designPrompt = String(body.designPrompt ?? '').trim()
+        const isDesign = kind === KIND_DESIGN
+        if (isDesign ? designPrompt === '' && voiceId === '' : voiceId === '') {
+          return sendJson(res, 400, { ok: false, message: isDesign ? '音色设计必须写一句描述。' : '音色 ID 不能为空。' })
+        }
+
+        // 名称缺省时取"音色本身"：预置音色取它的名字，音色设计取描述的前若干字。
+        const rawName = String(body.name ?? '').trim()
+        const fallbackName = isDesign ? designPrompt.slice(0, 12) : voiceId
+        // 模型名作为后缀自动附在名称末尾，让"这套音色属于哪款模型"在列表里看得见
+        // （`decorateName`）。它保证同名档案分属不同引擎时仍能一眼分辨。
+        const name = decorateName(rawName === '' ? fallbackName : rawName, model)
+
         const saved = profiles.put({
           id: id === '' ? undefined : id,
-          name: name === '' ? voiceId : name,
-          voiceId,
-          model: String(body.model ?? '').trim(),
-          source: body.source,
+          name,
+          // 音色设计的描述存进 voiceId（合成时要的就是它），同时冗余一份到
+          // designPrompt，便于界面区分"这是描述"与"这是一个 ID"。
+          voiceId: isDesign ? designPrompt : voiceId,
+          model,
+          designPrompt: isDesign ? designPrompt : '',
+          source: body.source ?? (isDesign ? 'design' : 'manual'),
           status: body.status,
         })
-        log(`profiles: ${id === '' ? '新增' : '更新'} ${saved.id}（${saved.voiceId}）`)
+        log(`profiles: ${id === '' ? '新增' : '更新'} ${saved.id}（${saved.model} / ${saved.voiceId || saved.sample}）`)
         return sendJson(res, 200, { ok: true, ...describeProfiles() })
       },
     },
@@ -414,8 +469,19 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
       },
     },
     {
-      // 上传音频复刻音色。body 是裸音频字节（不是 multipart），文件名与显示名走
-      // 查询串：两端都是本插件，没必要为一个 multipart 解析器引入依赖。
+      /**
+       * 上传音频复刻音色。body 是裸音频字节（不是 multipart），文件名、显示名与
+       * **目标模型**走查询串：两端都是本插件，没必要为一个 multipart 解析器引入依赖。
+       *
+       * 两条完全不同的链路，由目标模型决定：
+       *
+       * - **百炼复刻**：走「上传 → 内网 URL → create_voice → 轮询」四步，换回一个音色
+       *   ID。音色要几秒到几分钟才部署好，所以先落一条 `pending` 档案。
+       * - **MiMo 复刻**：**没有任何云端步骤**。参考音频就是音色本身，插件把它存到
+       *   `~/.dsh/voice/samples/`，档案里记下文件名就完事了 —— 于是档案**立刻可用**，
+       *   也不需要轮询。这正是"音色克隆只针对单次调用、所以要靠本地复用"的那一半：
+       *   上传一次，之后每次合成都把这份本地文件附在请求里。
+       */
       kind: 'exact',
       path: `${ROUTE_PREFIX}/clone`,
       async handler(req, res) {
@@ -423,6 +489,8 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
         if (cloner === undefined || profiles === undefined) return sendJson(res, 500, { ok: false, message: '音色克隆未初始化' })
 
         const query = new URL(req.url ?? '/', 'http://localhost').searchParams
+        const settings = getSettings() ?? {}
+        const targetModel = normalizeModel(query.get('model') ?? settings.model)
         const bytes = await readBytes(req, MAX_UPLOAD_BYTES)
         if (bytes === undefined) {
           return sendJson(res, 413, { ok: false, message: `音频太大了，请控制在 ${String(Math.floor(MAX_UPLOAD_BYTES / 1024 / 1024))} MB 以内。` })
@@ -431,15 +499,46 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
 
         const filename = String(query.get('filename') ?? '').trim() || 'voice.wav'
         const name = String(query.get('name') ?? '').trim() || filename
-        const settings = getSettings() ?? {}
-        const targetModel = String(query.get('model') ?? '').trim() || String(settings.model ?? '').trim()
 
+        // ---- MiMo 复刻：音频留在本机，档案立刻可用 ----
+        if (isMimo(targetModel) && kindOf(targetModel) === KIND_CLONE) {
+          if (samples === undefined) {
+            return sendJson(res, 500, { ok: false, message: '本地音色样本仓库未初始化' })
+          }
+          // MiMo 只认 mp3 与 wav，且 Base64 之后不能超过 10 MB。这两条在**上传时**就
+          // 拒掉，而不是等到合成：合成失败要花钱，而这里一次钱都不用花。
+          const ext = filename.slice(filename.lastIndexOf('.') + 1).toLowerCase()
+          if (!ACCEPTED_EXTENSIONS.includes(ext)) {
+            return sendJson(res, 400, { ok: false, message: `MiMo 只接受 ${ACCEPTED_EXTENSIONS.join(' / ')} 音频。` })
+          }
+          if (bytes.length > MAX_SAMPLE_BYTES) {
+            return sendJson(res, 413, { ok: false, message: `音频太大了，请控制在 ${String(Math.floor(MAX_SAMPLE_BYTES / 1024 / 1024))} MB 以内（MiMo 要求 Base64 后不超过 10 MB）。` })
+          }
+          // 先建档案再写样本：文件名由档案 id 决定，顺序反了就无从得知该存成什么名。
+          const created = profiles.put({
+            name: decorateName(name, targetModel),
+            voiceId: '',
+            model: targetModel,
+            sample: '',
+            source: 'clone',
+            status: 'ready',
+            createdAt: new Date().toISOString(),
+          })
+          const stored = samples.put({ id: created.id, filename, bytes })
+          const saved = profiles.put({ id: created.id, sample: stored.name })
+          // 用户上传一段音频，默认就是想用它 —— 于是直接设为当前音色。
+          profiles.activate(saved.id)
+          log(`clone(mimo): ${filename} → ${stored.name}（${String(stored.bytes)} 字节，本地复用）`)
+          return sendJson(res, 200, { ok: true, profile: saved, local: true, ...describeProfiles() })
+        }
+
+        // ---- 百炼复刻：走云端四步，音色要等部署 ----
         try {
           const made = await cloner.clone({ bytes, filename, targetModel })
           // 先落一条 pending 档案：音色要几秒到几分钟才部署好，但用户此刻就该在
           // 列表里看见它，而不是盯着一个转圈的请求干等。
           const saved = profiles.put({
-            name,
+            name: decorateName(name, targetModel),
             voiceId: made.voiceId,
             model: targetModel,
             source: 'clone',
@@ -517,11 +616,14 @@ export function cosyvoiceRoutes({ getSettings, synth, store, texts, profiles, cl
           let added = 0
           for (const voice of voices) {
             if (known.has(voice.voiceId)) continue
+            // 从音色 ID 前缀反推模型；猜不出就留空，合成时回落设置里的模型。
+            const model = modelFromVoiceId(voice.voiceId) ?? ''
             profiles.put({
-              name: voice.voiceId,
+              name: decorateName(voice.voiceId, model),
               voiceId: voice.voiceId,
-              // 从音色 ID 前缀反推模型；猜不出就留空，合成时回落设置里的模型。
-              model: modelFromVoiceId(voice.voiceId) ?? '',
+              model,
+              sample: '',
+              designPrompt: '',
               source: 'cloud',
               status: voice.phase === 'ready' ? 'ready' : 'pending',
               createdAt: new Date().toISOString(),
